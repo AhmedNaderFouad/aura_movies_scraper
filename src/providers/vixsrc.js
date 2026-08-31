@@ -2,6 +2,7 @@
 // VixSrc Provider - Extracts HLS streams from vixsrc.to
 // Supports multiple audio tracks and subtitles with full language detection
 // Part of AuraMovies local scrapers collection
+// ✅ Added proxy support for Vercel deployment
 
 const axios = require('axios');
 
@@ -11,12 +12,39 @@ const axios = require('axios');
 
 const BASE_URL = 'https://vixsrc.to';
 const VIXSRC_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150 Safari/537.36',
-    'Accept': 'application/json, text/javascript, */*; q=0.01',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Referer': BASE_URL,
-    'Origin': BASE_URL
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Referer': 'https://vixsrc.to/',
+    'Origin': 'https://vixsrc.to',
+    'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'same-origin',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1',
+    'Connection': 'keep-alive'
 };
+
+// ============================================
+// Proxy Detection
+// ============================================
+
+// Detect if running on Vercel (Serverless)
+const IS_VERCEL = process.env.VERCEL === '1' || process.env.NOW_REGION !== undefined;
+
+// Proxy function – wraps URL with proxy service
+function getProxiedUrl(url) {
+    if (IS_VERCEL) {
+        // Using allorigins.win as a free proxy to avoid IP blocking
+        // This returns the raw content of the target URL
+        return `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+    }
+    return url;
+}
 
 // ============================================
 // Language Mapping (Full Support)
@@ -232,29 +260,68 @@ function extractAudioTracks(playlistContent) {
 }
 
 // ============================================
-// API Request Functions
+// API Request Functions (with Proxy)
 // ============================================
 
 async function fetchApi(url) {
+    const proxiedUrl = getProxiedUrl(url);
+    console.log(`[Vixsrc] Fetching API: ${IS_VERCEL ? 'via Proxy' : 'direct'} - ${url}`);
     try {
-        const response = await axios.get(url, { headers: VIXSRC_HEADERS, timeout: 10000 });
+        const response = await axios.get(proxiedUrl, {
+            headers: VIXSRC_HEADERS,
+            timeout: 15000 // Increased timeout for proxy
+        });
         if (response.status !== 200 || !response.data) return null;
         return response.data;
-    } catch {
+    } catch (error) {
+        console.error(`[Vixsrc] API fetch error: ${error.message}`);
+        // If proxy fails, fallback to direct request (only if not on Vercel)
+        if (IS_VERCEL) {
+            console.log('[Vixsrc] Proxy failed, trying direct (might be blocked)...');
+            try {
+                const directResponse = await axios.get(url, {
+                    headers: VIXSRC_HEADERS,
+                    timeout: 10000
+                });
+                if (directResponse.status === 200 && directResponse.data) {
+                    return directResponse.data;
+                }
+            } catch (e) {
+                console.error('[Vixsrc] Direct fallback also failed:', e.message);
+            }
+        }
         return null;
     }
 }
 
 async function fetchEmbedPage(suburl) {
+    const fullUrl = BASE_URL + suburl;
+    const proxiedUrl = getProxiedUrl(fullUrl);
+    console.log(`[Vixsrc] Fetching Embed: ${IS_VERCEL ? 'via Proxy' : 'direct'} - ${fullUrl}`);
     try {
-        const response = await axios.get(BASE_URL + suburl, {
+        const response = await axios.get(proxiedUrl, {
             headers: { ...VIXSRC_HEADERS, Accept: 'text/html,application/xhtml+xml,*/*' },
-            timeout: 10000,
+            timeout: 15000,
             responseType: 'text'
         });
         if (response.status !== 200) return null;
         return response.data;
-    } catch {
+    } catch (error) {
+        console.error(`[Vixsrc] Embed fetch error: ${error.message}`);
+        // Fallback to direct
+        if (IS_VERCEL) {
+            console.log('[Vixsrc] Proxy failed, trying direct embed...');
+            try {
+                const directResponse = await axios.get(fullUrl, {
+                    headers: { ...VIXSRC_HEADERS, Accept: 'text/html,application/xhtml+xml,*/*' },
+                    timeout: 10000,
+                    responseType: 'text'
+                });
+                if (directResponse.status === 200) return directResponse.data;
+            } catch (e) {
+                console.error('[Vixsrc] Direct embed fallback failed:', e.message);
+            }
+        }
         return null;
     }
 }
@@ -412,6 +479,7 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
  */
 async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum = 1) {
     console.log(`[Vixsrc] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
+    console.log(`[Vixsrc] Running on ${IS_VERCEL ? 'Vercel (Proxy enabled)' : 'Localhost (Direct)'}`);
 
     let apiUrl;
     if (mediaType === 'movie') {
@@ -445,14 +513,29 @@ async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum
 
     let playlistContent = '';
     try {
-        const playlistResponse = await axios.get(masterUrl, {
+        // For playlist, we also use proxy if on Vercel
+        const playlistProxyUrl = getProxiedUrl(masterUrl);
+        const playlistResponse = await axios.get(playlistProxyUrl, {
             headers: { ...VIXSRC_HEADERS, Referer: apiUrl },
-            timeout: 10000,
+            timeout: 15000,
             responseType: 'text'
         });
         playlistContent = playlistResponse.data;
     } catch (e) {
-        console.log(`[Vixsrc] Could not fetch playlist content for language check.`);
+        console.log(`[Vixsrc] Could not fetch playlist content: ${e.message}`);
+        // Fallback direct
+        if (IS_VERCEL) {
+            try {
+                const directPlaylist = await axios.get(masterUrl, {
+                    headers: { ...VIXSRC_HEADERS, Referer: apiUrl },
+                    timeout: 10000,
+                    responseType: 'text'
+                });
+                playlistContent = directPlaylist.data;
+            } catch (e2) {
+                console.log(`[Vixsrc] Direct playlist fallback failed: ${e2.message}`);
+            }
+        }
     }
 
     const { sources, subtitles, audioTracks } = parsePlaylist(playlistContent, masterUrl, apiUrl);
