@@ -1,7 +1,6 @@
 // src/providers/vixsrc.js
-// VixSrc Provider - Extracts HLS streams from vixsrc.to
-// ✅ Fixed: data.match is not a function (ensures HTML is always string)
-// ✅ Enhanced with multiple proxies, retries, user-agent rotation
+// ✅ Ultimate fix for Vercel/Codespaces (403 Forbidden)
+// Uses Puppeteer + Multiple Proxies + High Timeout
 
 const axios = require('axios');
 
@@ -10,7 +9,7 @@ const axios = require('axios');
 // ============================================
 
 const BASE_URL = 'https://vixsrc.to';
-const IS_VERCEL = process.env.VERCEL === '1' || process.env.NOW_REGION !== undefined;
+const IS_VERCEL = process.env.VERCEL === '1' || process.env.NOW_REGION !== undefined || process.env.CODESPACES === 'true';
 
 // قائمة بـ User-Agents للتناوب
 const USER_AGENTS = [
@@ -19,7 +18,6 @@ const USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0',
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
 ];
 let uaIndex = 0;
 
@@ -27,16 +25,13 @@ function getNextUserAgent() {
     return USER_AGENTS[uaIndex++ % USER_AGENTS.length];
 }
 
-// قائمة بـ Proxies (مجانية)
+// Proxies سريعة (للحالات التي لا تعمل فيها Puppeteer)
 const PROXY_SERVICES = [
     (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
     (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
     (url) => `https://proxy.cors.sh/${encodeURIComponent(url)}`,
-    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-    (url) => `https://thingproxy.freeboard.io/fetch/${encodeURIComponent(url)}`,
 ];
 
-// Headers الأساسية
 const VIXSRC_HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
@@ -53,26 +48,6 @@ const VIXSRC_HEADERS = {
     'Upgrade-Insecure-Requests': '1',
     'Connection': 'keep-alive'
 };
-
-// ============================================
-// Simple Retry Logic (بدون axios-retry)
-// ============================================
-
-async function fetchWithRetry(fn, retries = 3, delay = 1000) {
-    let lastError;
-    for (let i = 0; i < retries; i++) {
-        try {
-            return await fn();
-        } catch (error) {
-            lastError = error;
-            if (i < retries - 1) {
-                console.log(`[Vixsrc] Retry ${i + 1}/${retries} after error: ${error.message}`);
-                await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
-            }
-        }
-    }
-    throw lastError;
-}
 
 // ============================================
 // Language Mapping (Full Support)
@@ -193,10 +168,62 @@ function extractAudioTracks(playlistContent) {
 }
 
 // ============================================
-// Core Fetch Functions (with manual retry)
+// Puppeteer Engine (محاكاة متصفح حقيقي)
 // ============================================
 
-async function fetchWithProxy(url, proxyFn, headers, responseType = 'text', timeout = 15000) {
+let puppeteer, chromium;
+
+async function fetchWithPuppeteer(url, isJson = false) {
+    try {
+        if (!puppeteer) {
+            puppeteer = require('puppeteer-core');
+            chromium = require('chrome-aws-lambda');
+        }
+    } catch (e) {
+        console.log('[Vixsrc] Puppeteer not installed, skipping...');
+        return null;
+    }
+
+    console.log('[Vixsrc] Launching Puppeteer browser...');
+    let browser = null;
+    try {
+        browser = await puppeteer.launch({
+            args: chromium.args,
+            executablePath: await chromium.executablePath,
+            headless: true,
+            ignoreHTTPSErrors: true,
+        });
+        const page = await browser.newPage();
+        await page.setUserAgent(getNextUserAgent());
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        });
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+        const content = await page.content();
+        await browser.close();
+        console.log('[Vixsrc] Puppeteer succeeded.');
+        
+        if (isJson) {
+            const jsonMatch = content.match(/{.*}/s);
+            if (jsonMatch) {
+                try { return JSON.parse(jsonMatch[0]); } catch {}
+            }
+            return null;
+        }
+        return content;
+    } catch (error) {
+        if (browser) await browser.close();
+        console.log(`[Vixsrc] Puppeteer failed: ${error.message}`);
+        return null;
+    }
+}
+
+// ============================================
+// Core Fetch Functions (Puppeteer أولاً)
+// ============================================
+
+async function fetchWithProxy(url, proxyFn, headers, responseType = 'text', timeout = 20000) {
     const proxyUrl = proxyFn(url);
     console.log(`[Vixsrc] Trying proxy: ${proxyUrl.substring(0, 60)}...`);
     try {
@@ -235,81 +262,30 @@ async function fetchDirect(url, headers, responseType = 'text', timeout = 10000)
     return null;
 }
 
-// الدالة الرئيسية للجلب مع محاولات متعددة يدوية
 async function fetchWithFallback(url, options = {}) {
-    const { isJson = false, isHtml = false, timeout = 15000 } = options;
+    const { isJson = false, isHtml = false, timeout = 20000 } = options;
     const headers = { ...VIXSRC_HEADERS };
     let responseType = 'text';
-    if (isJson) {
-        responseType = 'json';
-    } else if (isHtml) {
-        responseType = 'text';
+    if (isJson) responseType = 'json';
+    else if (isHtml) responseType = 'text';
+
+    // 1. محاولة Puppeteer (الأكثر نجاحاً على Vercel)
+    if (IS_VERCEL) {
+        const result = await fetchWithPuppeteer(url, isJson);
+        if (result) return result;
     }
 
-    // 1. حاول مباشرة مع retry يدوي
-    try {
-        const result = await fetchWithRetry(async () => {
-            return await fetchDirect(url, headers, responseType, timeout);
-        }, 3, 1000);
-        if (result) {
-            if (isJson && typeof result === 'string') {
-                try { return JSON.parse(result); } catch {}
-            }
-            return result;
-        }
-    } catch (e) {
-        console.log(`[Vixsrc] Direct with retry failed: ${e.message}`);
+    // 2. محاولة مباشرة مع Retry يدوي
+    for (let i = 0; i < 3; i++) {
+        const result = await fetchDirect(url, headers, responseType, timeout);
+        if (result) return result;
+        await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
     }
 
-    // 2. جرب جميع الـ Proxies
+    // 3. محاولة جميع الـ Proxies
     for (const proxyFn of PROXY_SERVICES) {
-        try {
-            const result = await fetchWithRetry(async () => {
-                return await fetchWithProxy(url, proxyFn, headers, responseType, timeout);
-            }, 2, 800);
-            if (result) {
-                if (isJson && typeof result === 'string') {
-                    try { return JSON.parse(result); } catch {}
-                }
-                return result;
-            }
-        } catch (e) {
-            console.log(`[Vixsrc] Proxy retry failed: ${e.message}`);
-        }
-    }
-
-    // 3. استخدام Puppeteer (اختياري)
-    try {
-        const puppeteer = require('puppeteer-core');
-        const chromium = require('chrome-aws-lambda');
-        console.log('[Vixsrc] Trying Puppeteer...');
-        let browser = null;
-        try {
-            browser = await puppeteer.launch({
-                args: chromium.args,
-                executablePath: await chromium.executablePath,
-                headless: true,
-            });
-            const page = await browser.newPage();
-            await page.setUserAgent(getNextUserAgent());
-            await page.goto(url, { waitUntil: 'networkidle2', timeout: 20000 });
-            const content = await page.content();
-            await browser.close();
-            console.log('[Vixsrc] Puppeteer succeeded.');
-            if (isJson) {
-                const jsonMatch = content.match(/{.*}/s);
-                if (jsonMatch) {
-                    try { return JSON.parse(jsonMatch[0]); } catch {}
-                }
-                return null;
-            }
-            return content;
-        } catch (e) {
-            if (browser) await browser.close();
-            console.log(`[Vixsrc] Puppeteer failed: ${e.message}`);
-        }
-    } catch (e) {
-        console.log('[Vixsrc] Puppeteer not available.');
+        const result = await fetchWithProxy(url, proxyFn, headers, responseType, timeout);
+        if (result) return result;
     }
 
     console.log('[Vixsrc] All fetch methods failed.');
@@ -322,25 +298,16 @@ async function fetchWithFallback(url, options = {}) {
 
 async function fetchApi(url) {
     console.log(`[Vixsrc] Fetching API: ${url}`);
-    const data = await fetchWithFallback(url, { isJson: true, timeout: 15000 });
+    const data = await fetchWithFallback(url, { isJson: true, timeout: 20000 });
     return data || null;
 }
 
-// ✅ الأهم: تأكد من أن fetchEmbedPage ترجع نصاً دائماً
 async function fetchEmbedPage(suburl) {
     const fullUrl = BASE_URL + suburl;
     console.log(`[Vixsrc] Fetching Embed: ${fullUrl}`);
-    // طلب HTML كنص
-    const data = await fetchWithFallback(fullUrl, { isHtml: true, timeout: 15000 });
-    // تأكد من أن القيمة المعادة هي نص أو null
-    if (typeof data === 'string') {
-        return data;
-    }
-    if (data && typeof data === 'object') {
-        // إذا كان كائناً (مثل خطأ) حوّله إلى نص
-        return JSON.stringify(data);
-    }
-    // أي شيء آخر → null
+    const data = await fetchWithFallback(fullUrl, { isHtml: true, timeout: 20000 });
+    if (typeof data === 'string') return data;
+    if (data && typeof data === 'object') return JSON.stringify(data);
     return null;
 }
 
@@ -348,26 +315,17 @@ async function fetchEmbedPage(suburl) {
 // Token Extraction & Playlist Processing
 // ============================================
 
-// ✅ تأكد من أن extractTokenData تستقبل نصاً
 function extractTokenData(html) {
-    // إذا لم يكن html نصاً، حاول تحويله
     if (typeof html !== 'string') {
-        console.log('[Vixsrc] extractTokenData: input is not string, converting...');
-        if (html && typeof html === 'object') {
-            html = JSON.stringify(html);
-        } else {
-            html = String(html);
-        }
+        if (html && typeof html === 'object') html = JSON.stringify(html);
+        else html = String(html);
     }
     const token = html.match(/token["']\s*:\s*["']([^"']+)/)?.[1];
     const expires = html.match(/expires["']\s*:\s*["']([^"']+)/)?.[1];
     const playlist = html.match(/url\s*:\s*["']([^"']+)/)?.[1];
-    if (!token || !expires || !playlist) {
-        console.log('[Vixsrc] Could not extract token/expires/playlist from HTML');
-        return null;
-    }
-    if (parseInt(expires, 10) * 1000 - 60_000 < Date.now()) {
-        console.log('[Vixsrc] Token is expired');
+    if (!token || !expires || !playlist) return null;
+    if (parseInt(expires, 10) * 1000 - 60000 < Date.now()) {
+        console.log('[Vixsrc] Token expired');
         return null;
     }
     return { token, expires, playlist };
@@ -380,9 +338,7 @@ function buildMasterUrl(tokenData) {
 }
 
 function parsePlaylist(content, masterUrl, pageApiUrl) {
-    // تأكد من أن content نص
     if (typeof content !== 'string' || !content) {
-        console.log('[Vixsrc] parsePlaylist: content is not string or empty');
         return { sources: [], subtitles: [], audioTracks: [] };
     }
     const sources = [];
@@ -496,7 +452,7 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
 
 async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum = 1) {
     console.log(`[Vixsrc] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
-    console.log(`[Vixsrc] Running on ${IS_VERCEL ? 'Vercel (with fallbacks)' : 'Localhost'}`);
+    console.log(`[Vixsrc] Running on ${IS_VERCEL ? 'Vercel/Codespaces (Puppeteer mode)' : 'Localhost'}`);
 
     let apiUrl;
     if (mediaType === 'movie') {
@@ -530,11 +486,10 @@ async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum
 
     let playlistContent = '';
     try {
-        const playlistData = await fetchWithFallback(masterUrl, { isHtml: false, timeout: 15000 });
+        const playlistData = await fetchWithFallback(masterUrl, { isHtml: false, timeout: 20000 });
         if (playlistData && typeof playlistData === 'string') {
             playlistContent = playlistData;
         } else if (playlistData && typeof playlistData === 'object') {
-            console.log('[Vixsrc] Playlist data is object, converting to string');
             playlistContent = JSON.stringify(playlistData);
         }
     } catch (e) {
