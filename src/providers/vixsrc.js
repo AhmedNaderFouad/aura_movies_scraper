@@ -1,8 +1,7 @@
 // src/providers/vixsrc.js
 // VixSrc Provider - Extracts HLS streams from vixsrc.to
-// Supports multiple audio tracks and subtitles with full language detection
-// Part of AuraMovies local scrapers collection
-// ✅ Added proxy support for Vercel deployment
+// ✅ Fixed: data.match is not a function (ensures HTML is always string)
+// ✅ Enhanced with multiple proxies, retries, user-agent rotation
 
 const axios = require('axios');
 
@@ -11,8 +10,34 @@ const axios = require('axios');
 // ============================================
 
 const BASE_URL = 'https://vixsrc.to';
+const IS_VERCEL = process.env.VERCEL === '1' || process.env.NOW_REGION !== undefined;
+
+// قائمة بـ User-Agents للتناوب
+const USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+];
+let uaIndex = 0;
+
+function getNextUserAgent() {
+    return USER_AGENTS[uaIndex++ % USER_AGENTS.length];
+}
+
+// قائمة بـ Proxies (مجانية)
+const PROXY_SERVICES = [
+    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    (url) => `https://proxy.cors.sh/${encodeURIComponent(url)}`,
+    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    (url) => `https://thingproxy.freeboard.io/fetch/${encodeURIComponent(url)}`,
+];
+
+// Headers الأساسية
 const VIXSRC_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
     'Accept-Encoding': 'gzip, deflate, br',
@@ -30,20 +55,23 @@ const VIXSRC_HEADERS = {
 };
 
 // ============================================
-// Proxy Detection
+// Simple Retry Logic (بدون axios-retry)
 // ============================================
 
-// Detect if running on Vercel (Serverless)
-const IS_VERCEL = process.env.VERCEL === '1' || process.env.NOW_REGION !== undefined;
-
-// Proxy function – wraps URL with proxy service
-function getProxiedUrl(url) {
-    if (IS_VERCEL) {
-        // Using allorigins.win as a free proxy to avoid IP blocking
-        // This returns the raw content of the target URL
-        return `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+async function fetchWithRetry(fn, retries = 3, delay = 1000) {
+    let lastError;
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await fn();
+        } catch (error) {
+            lastError = error;
+            if (i < retries - 1) {
+                console.log(`[Vixsrc] Retry ${i + 1}/${retries} after error: ${error.message}`);
+                await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
+            }
+        }
     }
-    return url;
+    throw lastError;
 }
 
 // ============================================
@@ -51,113 +79,46 @@ function getProxiedUrl(url) {
 // ============================================
 
 const LANGUAGE_MAP = {
-    'en': 'English',
-    'eng': 'English',
-    'english': 'English',
-    'ar': 'Arabic',
-    'ara': 'Arabic',
-    'arabic': 'Arabic',
-    'es': 'Spanish',
-    'spa': 'Spanish',
-    'spanish': 'Spanish',
-    'español': 'Spanish',
-    'latino': 'Spanish (Latino)',
-    'it': 'Italian',
-    'ita': 'Italian',
-    'italian': 'Italian',
-    'italiano': 'Italian',
-    'fr': 'French',
-    'fra': 'French',
-    'french': 'French',
-    'francais': 'French',
-    'française': 'French',
-    'de': 'German',
-    'deu': 'German',
-    'german': 'German',
-    'deutsch': 'German',
-    'pt': 'Portuguese',
-    'por': 'Portuguese',
-    'portuguese': 'Portuguese',
-    'português': 'Portuguese',
-    'ru': 'Russian',
-    'rus': 'Russian',
-    'russian': 'Russian',
-    'русский': 'Russian',
-    'ja': 'Japanese',
-    'jpn': 'Japanese',
-    'japanese': 'Japanese',
-    '日本語': 'Japanese',
-    'ko': 'Korean',
-    'kor': 'Korean',
-    'korean': 'Korean',
-    '한국어': 'Korean',
-    'zh': 'Chinese',
-    'zho': 'Chinese',
-    'chinese': 'Chinese',
-    '中文': 'Chinese',
-    'hi': 'Hindi',
-    'hin': 'Hindi',
-    'hindi': 'Hindi',
-    'हिन्दी': 'Hindi',
-    'tr': 'Turkish',
-    'tur': 'Turkish',
-    'turkish': 'Turkish',
-    'türkçe': 'Turkish',
-    'nl': 'Dutch',
-    'nld': 'Dutch',
-    'dutch': 'Dutch',
-    'nederlands': 'Dutch',
-    'pl': 'Polish',
-    'pol': 'Polish',
-    'polish': 'Polish',
-    'polski': 'Polish',
-    'sv': 'Swedish',
-    'swe': 'Swedish',
-    'swedish': 'Swedish',
-    'svenska': 'Swedish',
-    'da': 'Danish',
-    'dan': 'Danish',
-    'danish': 'Danish',
-    'dansk': 'Danish',
-    'fi': 'Finnish',
-    'fin': 'Finnish',
-    'finnish': 'Finnish',
-    'suomi': 'Finnish',
-    'no': 'Norwegian',
-    'nor': 'Norwegian',
-    'norwegian': 'Norwegian',
-    'norsk': 'Norwegian',
-    'el': 'Greek',
-    'ell': 'Greek',
-    'greek': 'Greek',
-    'ελληνικά': 'Greek',
-    'he': 'Hebrew',
-    'heb': 'Hebrew',
-    'hebrew': 'Hebrew',
-    'עברית': 'Hebrew',
-    'th': 'Thai',
-    'tha': 'Thai',
-    'thai': 'Thai',
-    'ไทย': 'Thai',
-    'vi': 'Vietnamese',
-    'vie': 'Vietnamese',
-    'vietnamese': 'Vietnamese',
-    'Tiếng Việt': 'Vietnamese',
-    'id': 'Indonesian',
-    'ind': 'Indonesian',
-    'indonesian': 'Indonesian',
+    'en': 'English', 'eng': 'English', 'english': 'English',
+    'ar': 'Arabic', 'ara': 'Arabic', 'arabic': 'Arabic',
+    'es': 'Spanish', 'spa': 'Spanish', 'spanish': 'Spanish',
+    'español': 'Spanish', 'latino': 'Spanish (Latino)',
+    'it': 'Italian', 'ita': 'Italian', 'italian': 'Italian',
+    'italiano': 'Italian', 'fr': 'French', 'fra': 'French',
+    'french': 'French', 'francais': 'French', 'française': 'French',
+    'de': 'German', 'deu': 'German', 'german': 'German',
+    'deutsch': 'German', 'pt': 'Portuguese', 'por': 'Portuguese',
+    'portuguese': 'Portuguese', 'português': 'Portuguese',
+    'ru': 'Russian', 'rus': 'Russian', 'russian': 'Russian',
+    'русский': 'Russian', 'ja': 'Japanese', 'jpn': 'Japanese',
+    'japanese': 'Japanese', '日本語': 'Japanese',
+    'ko': 'Korean', 'kor': 'Korean', 'korean': 'Korean',
+    '한국어': 'Korean', 'zh': 'Chinese', 'zho': 'Chinese',
+    'chinese': 'Chinese', '中文': 'Chinese',
+    'hi': 'Hindi', 'hin': 'Hindi', 'hindi': 'Hindi',
+    'हिन्दी': 'Hindi', 'tr': 'Turkish', 'tur': 'Turkish',
+    'turkish': 'Turkish', 'türkçe': 'Turkish',
+    'nl': 'Dutch', 'nld': 'Dutch', 'dutch': 'Dutch',
+    'nederlands': 'Dutch', 'pl': 'Polish', 'pol': 'Polish',
+    'polish': 'Polish', 'polski': 'Polish',
+    'sv': 'Swedish', 'swe': 'Swedish', 'swedish': 'Swedish',
+    'svenska': 'Swedish', 'da': 'Danish', 'dan': 'Danish',
+    'danish': 'Danish', 'dansk': 'Danish',
+    'fi': 'Finnish', 'fin': 'Finnish', 'finnish': 'Finnish',
+    'suomi': 'Finnish', 'no': 'Norwegian', 'nor': 'Norwegian',
+    'norwegian': 'Norwegian', 'norsk': 'Norwegian',
+    'el': 'Greek', 'ell': 'Greek', 'greek': 'Greek',
+    'ελληνικά': 'Greek', 'he': 'Hebrew', 'heb': 'Hebrew',
+    'hebrew': 'Hebrew', 'עברית': 'Hebrew',
+    'th': 'Thai', 'tha': 'Thai', 'thai': 'Thai',
+    'ไทย': 'Thai', 'vi': 'Vietnamese', 'vie': 'Vietnamese',
+    'vietnamese': 'Vietnamese', 'Tiếng Việt': 'Vietnamese',
+    'id': 'Indonesian', 'ind': 'Indonesian', 'indonesian': 'Indonesian',
     'bahasa indonesia': 'Indonesian',
-    'ms': 'Malay',
-    'msa': 'Malay',
-    'malay': 'Malay',
+    'ms': 'Malay', 'msa': 'Malay', 'malay': 'Malay',
     'bahasa melayu': 'Malay',
 };
 
-/**
- * Get full language name from code or label
- * @param {string} langCode - Language code or label
- * @returns {string} Full language name
- */
 function getLanguageName(langCode) {
     if (!langCode) return 'Unknown';
     const lower = langCode.toLowerCase().trim();
@@ -168,18 +129,11 @@ function getLanguageName(langCode) {
 // Utility Functions
 // ============================================
 
-/**
- * Detect all available languages from playlist content
- * @param {string} playlistContent - HLS playlist content
- * @returns {Array} Array of detected language objects
- */
 function detectAllLanguages(playlistContent) {
     if (!playlistContent) return [];
-
     const languages = [];
     const audioTrackRegex = /#EXT-X-MEDIA:TYPE=AUDIO[^\n]*/gi;
     let match;
-
     while ((match = audioTrackRegex.exec(playlistContent)) !== null) {
         const block = match[0];
         const langCode = block.match(/LANGUAGE="([^"]+)"/)?.[1] || null;
@@ -187,7 +141,6 @@ function detectAllLanguages(playlistContent) {
         const uri = block.match(/URI="([^"]+)"/)?.[1] || null;
         const isDefault = block.includes('DEFAULT=YES') || block.includes('DEFAULT=1');
         const isForced = block.includes('FORCED=YES') || block.includes('FORCED=1');
-
         if (langCode) {
             languages.push({
                 code: langCode,
@@ -200,42 +153,23 @@ function detectAllLanguages(playlistContent) {
             });
         }
     }
-
     return languages;
 }
 
-/**
- * Detect available languages from playlist content (legacy)
- * @param {string} playlistContent - HLS playlist content
- * @returns {string} Detected language code
- */
 function detectLanguageFromPlaylist(playlistContent) {
     if (!playlistContent) return 'unknown';
-
     const languages = detectAllLanguages(playlistContent);
-
     if (languages.length === 0) return 'unknown';
-
-    // Check for English first
     const english = languages.find(l => l.code === 'en' || l.code === 'eng');
     if (english) return 'en';
-
-    // Return first available language
     return languages[0].code;
 }
 
-/**
- * Extract all audio tracks from playlist (no language filtering)
- * @param {string} playlistContent - HLS playlist content
- * @returns {Array} Array of audio track objects
- */
 function extractAudioTracks(playlistContent) {
     if (!playlistContent) return [];
-
     const audioTracks = [];
     const audioTrackRegex = /#EXT-X-MEDIA:TYPE=AUDIO[^\n]*/gi;
     let match;
-
     while ((match = audioTrackRegex.exec(playlistContent)) !== null) {
         const block = match[0];
         const language = block.match(/LANGUAGE="([^"]+)"/)?.[1] || 'unknown';
@@ -244,7 +178,6 @@ function extractAudioTracks(playlistContent) {
         const isDefault = block.includes('DEFAULT=YES') || block.includes('DEFAULT=1');
         const isForced = block.includes('FORCED=YES') || block.includes('FORCED=1');
         const channels = block.match(/CHANNELS="([^"]+)"/)?.[1] || null;
-
         audioTracks.push({
             language: language,
             label: label,
@@ -260,88 +193,183 @@ function extractAudioTracks(playlistContent) {
 }
 
 // ============================================
-// API Request Functions (with Proxy)
+// Core Fetch Functions (with manual retry)
+// ============================================
+
+async function fetchWithProxy(url, proxyFn, headers, responseType = 'text', timeout = 15000) {
+    const proxyUrl = proxyFn(url);
+    console.log(`[Vixsrc] Trying proxy: ${proxyUrl.substring(0, 60)}...`);
+    try {
+        const response = await axios.get(proxyUrl, {
+            headers: { ...headers, 'User-Agent': getNextUserAgent() },
+            timeout: timeout,
+            responseType: responseType,
+            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+        });
+        if (response.status === 200 && response.data) {
+            console.log(`[Vixsrc] Proxy succeeded.`);
+            return response.data;
+        }
+    } catch (error) {
+        console.log(`[Vixsrc] Proxy failed: ${error.message}`);
+    }
+    return null;
+}
+
+async function fetchDirect(url, headers, responseType = 'text', timeout = 10000) {
+    console.log(`[Vixsrc] Trying direct: ${url}`);
+    try {
+        const response = await axios.get(url, {
+            headers: { ...headers, 'User-Agent': getNextUserAgent() },
+            timeout: timeout,
+            responseType: responseType,
+            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+        });
+        if (response.status === 200 && response.data) {
+            console.log(`[Vixsrc] Direct succeeded.`);
+            return response.data;
+        }
+    } catch (error) {
+        console.log(`[Vixsrc] Direct failed: ${error.message}`);
+    }
+    return null;
+}
+
+// الدالة الرئيسية للجلب مع محاولات متعددة يدوية
+async function fetchWithFallback(url, options = {}) {
+    const { isJson = false, isHtml = false, timeout = 15000 } = options;
+    const headers = { ...VIXSRC_HEADERS };
+    let responseType = 'text';
+    if (isJson) {
+        responseType = 'json';
+    } else if (isHtml) {
+        responseType = 'text';
+    }
+
+    // 1. حاول مباشرة مع retry يدوي
+    try {
+        const result = await fetchWithRetry(async () => {
+            return await fetchDirect(url, headers, responseType, timeout);
+        }, 3, 1000);
+        if (result) {
+            if (isJson && typeof result === 'string') {
+                try { return JSON.parse(result); } catch {}
+            }
+            return result;
+        }
+    } catch (e) {
+        console.log(`[Vixsrc] Direct with retry failed: ${e.message}`);
+    }
+
+    // 2. جرب جميع الـ Proxies
+    for (const proxyFn of PROXY_SERVICES) {
+        try {
+            const result = await fetchWithRetry(async () => {
+                return await fetchWithProxy(url, proxyFn, headers, responseType, timeout);
+            }, 2, 800);
+            if (result) {
+                if (isJson && typeof result === 'string') {
+                    try { return JSON.parse(result); } catch {}
+                }
+                return result;
+            }
+        } catch (e) {
+            console.log(`[Vixsrc] Proxy retry failed: ${e.message}`);
+        }
+    }
+
+    // 3. استخدام Puppeteer (اختياري)
+    try {
+        const puppeteer = require('puppeteer-core');
+        const chromium = require('chrome-aws-lambda');
+        console.log('[Vixsrc] Trying Puppeteer...');
+        let browser = null;
+        try {
+            browser = await puppeteer.launch({
+                args: chromium.args,
+                executablePath: await chromium.executablePath,
+                headless: true,
+            });
+            const page = await browser.newPage();
+            await page.setUserAgent(getNextUserAgent());
+            await page.goto(url, { waitUntil: 'networkidle2', timeout: 20000 });
+            const content = await page.content();
+            await browser.close();
+            console.log('[Vixsrc] Puppeteer succeeded.');
+            if (isJson) {
+                const jsonMatch = content.match(/{.*}/s);
+                if (jsonMatch) {
+                    try { return JSON.parse(jsonMatch[0]); } catch {}
+                }
+                return null;
+            }
+            return content;
+        } catch (e) {
+            if (browser) await browser.close();
+            console.log(`[Vixsrc] Puppeteer failed: ${e.message}`);
+        }
+    } catch (e) {
+        console.log('[Vixsrc] Puppeteer not available.');
+    }
+
+    console.log('[Vixsrc] All fetch methods failed.');
+    return null;
+}
+
+// ============================================
+// API Request Functions
 // ============================================
 
 async function fetchApi(url) {
-    const proxiedUrl = getProxiedUrl(url);
-    console.log(`[Vixsrc] Fetching API: ${IS_VERCEL ? 'via Proxy' : 'direct'} - ${url}`);
-    try {
-        const response = await axios.get(proxiedUrl, {
-            headers: VIXSRC_HEADERS,
-            timeout: 15000 // Increased timeout for proxy
-        });
-        if (response.status !== 200 || !response.data) return null;
-        return response.data;
-    } catch (error) {
-        console.error(`[Vixsrc] API fetch error: ${error.message}`);
-        // If proxy fails, fallback to direct request (only if not on Vercel)
-        if (IS_VERCEL) {
-            console.log('[Vixsrc] Proxy failed, trying direct (might be blocked)...');
-            try {
-                const directResponse = await axios.get(url, {
-                    headers: VIXSRC_HEADERS,
-                    timeout: 10000
-                });
-                if (directResponse.status === 200 && directResponse.data) {
-                    return directResponse.data;
-                }
-            } catch (e) {
-                console.error('[Vixsrc] Direct fallback also failed:', e.message);
-            }
-        }
-        return null;
-    }
+    console.log(`[Vixsrc] Fetching API: ${url}`);
+    const data = await fetchWithFallback(url, { isJson: true, timeout: 15000 });
+    return data || null;
 }
 
+// ✅ الأهم: تأكد من أن fetchEmbedPage ترجع نصاً دائماً
 async function fetchEmbedPage(suburl) {
     const fullUrl = BASE_URL + suburl;
-    const proxiedUrl = getProxiedUrl(fullUrl);
-    console.log(`[Vixsrc] Fetching Embed: ${IS_VERCEL ? 'via Proxy' : 'direct'} - ${fullUrl}`);
-    try {
-        const response = await axios.get(proxiedUrl, {
-            headers: { ...VIXSRC_HEADERS, Accept: 'text/html,application/xhtml+xml,*/*' },
-            timeout: 15000,
-            responseType: 'text'
-        });
-        if (response.status !== 200) return null;
-        return response.data;
-    } catch (error) {
-        console.error(`[Vixsrc] Embed fetch error: ${error.message}`);
-        // Fallback to direct
-        if (IS_VERCEL) {
-            console.log('[Vixsrc] Proxy failed, trying direct embed...');
-            try {
-                const directResponse = await axios.get(fullUrl, {
-                    headers: { ...VIXSRC_HEADERS, Accept: 'text/html,application/xhtml+xml,*/*' },
-                    timeout: 10000,
-                    responseType: 'text'
-                });
-                if (directResponse.status === 200) return directResponse.data;
-            } catch (e) {
-                console.error('[Vixsrc] Direct embed fallback failed:', e.message);
-            }
-        }
-        return null;
+    console.log(`[Vixsrc] Fetching Embed: ${fullUrl}`);
+    // طلب HTML كنص
+    const data = await fetchWithFallback(fullUrl, { isHtml: true, timeout: 15000 });
+    // تأكد من أن القيمة المعادة هي نص أو null
+    if (typeof data === 'string') {
+        return data;
     }
+    if (data && typeof data === 'object') {
+        // إذا كان كائناً (مثل خطأ) حوّله إلى نص
+        return JSON.stringify(data);
+    }
+    // أي شيء آخر → null
+    return null;
 }
 
 // ============================================
 // Token Extraction & Playlist Processing
 // ============================================
 
+// ✅ تأكد من أن extractTokenData تستقبل نصاً
 function extractTokenData(html) {
+    // إذا لم يكن html نصاً، حاول تحويله
+    if (typeof html !== 'string') {
+        console.log('[Vixsrc] extractTokenData: input is not string, converting...');
+        if (html && typeof html === 'object') {
+            html = JSON.stringify(html);
+        } else {
+            html = String(html);
+        }
+    }
     const token = html.match(/token["']\s*:\s*["']([^"']+)/)?.[1];
     const expires = html.match(/expires["']\s*:\s*["']([^"']+)/)?.[1];
     const playlist = html.match(/url\s*:\s*["']([^"']+)/)?.[1];
-
-    if (!token || !expires || !playlist) return null;
-
+    if (!token || !expires || !playlist) {
+        console.log('[Vixsrc] Could not extract token/expires/playlist from HTML');
+        return null;
+    }
     if (parseInt(expires, 10) * 1000 - 60_000 < Date.now()) {
         console.log('[Vixsrc] Token is expired');
         return null;
     }
-
     return { token, expires, playlist };
 }
 
@@ -352,13 +380,17 @@ function buildMasterUrl(tokenData) {
 }
 
 function parsePlaylist(content, masterUrl, pageApiUrl) {
+    // تأكد من أن content نص
+    if (typeof content !== 'string' || !content) {
+        console.log('[Vixsrc] parsePlaylist: content is not string or empty');
+        return { sources: [], subtitles: [], audioTracks: [] };
+    }
     const sources = [];
     const subtitles = [];
     const allAudioTracks = [];
 
     const lines = content.split('\n');
 
-    // Extract all audio tracks with full metadata
     for (const line of lines) {
         if (!line.startsWith('#EXT-X-MEDIA:TYPE=AUDIO')) continue;
         const language = line.match(/LANGUAGE="([^"]+)"/)?.[1] || 'unknown';
@@ -367,7 +399,6 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
         const isDefault = line.includes('DEFAULT=YES') || line.includes('DEFAULT=1');
         const isForced = line.includes('FORCED=YES') || line.includes('FORCED=1');
         const channels = line.match(/CHANNELS="([^"]+)"/)?.[1] || null;
-
         allAudioTracks.push({
             language: language,
             label: label,
@@ -380,7 +411,6 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
         });
     }
 
-    // Extract subtitles
     for (const line of lines) {
         if (!line.startsWith('#EXT-X-MEDIA:TYPE=SUBTITLES')) continue;
         const url = line.match(/URI="([^"]+)"/)?.[1];
@@ -389,7 +419,6 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
         const language = line.match(/LANGUAGE="([^"]+)"/)?.[1] ?? 'unknown';
         const isDefault = line.includes('DEFAULT=YES') || line.includes('DEFAULT=1');
         const isForced = line.includes('FORCED=YES') || line.includes('FORCED=1');
-
         subtitles.push({
             url: url,
             label: label,
@@ -402,7 +431,6 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
         });
     }
 
-    //  DEDUPLICATE AUDIO TRACKS - keep only one per language (prefer default)
     const uniqueAudioTracksMap = new Map();
     for (const track of allAudioTracks) {
         const langKey = track.language.toLowerCase();
@@ -410,7 +438,6 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
             uniqueAudioTracksMap.set(langKey, track);
         } else {
             const existing = uniqueAudioTracksMap.get(langKey);
-            // If this track is default and existing is not, replace
             if (track.isDefault && !existing.isDefault) {
                 uniqueAudioTracksMap.set(langKey, track);
             }
@@ -418,7 +445,6 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
     }
     const uniqueAudioTracks = Array.from(uniqueAudioTracksMap.values());
 
-    // Extract best resolution
     const variantRegex = /#EXT-X-STREAM-INF:[^\n]*RESOLUTION=\d+x(\d+)[^\n]*\n([^\n]+)/g;
     let match;
     let bestResolution = 0;
@@ -436,7 +462,6 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
     console.log(`[Vixsrc] Available audio tracks (unique): ${uniqueAudioTracks.length} (${allAudioTracks.length} total before dedup)`);
     console.log(`[Vixsrc] Available subtitles: ${subtitles.length}`);
 
-    // Sort audio tracks: English first, then others, then default
     const sortedAudioTracks = [...uniqueAudioTracks].sort((a, b) => {
         if (a.language === 'en' || a.language === 'eng') return -1;
         if (b.language === 'en' || b.language === 'eng') return 1;
@@ -452,7 +477,7 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
         quality: `${bestResolution}p`,
         provider: 'vixsrc',
         language: detectedLang,
-        audioTracks: sortedAudioTracks, // Deduplicated tracks with full metadata
+        audioTracks: sortedAudioTracks,
         subtitles: subtitles,
         hasAudioTracks: sortedAudioTracks.length > 0,
         hasSubtitles: subtitles.length > 0,
@@ -466,20 +491,12 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
 }
 
 // ============================================
-// Main Stream Function (exported)
+// Main Stream Function
 // ============================================
 
-/**
- * Fetch streams from VixSrc
- * @param {string|number} tmdbId - TMDB ID
- * @param {string} mediaType - 'movie' or 'tv'
- * @param {number} seasonNum - Season number (tv only)
- * @param {number} episodeNum - Episode number (tv only)
- * @returns {Promise<Array>} Array of stream objects
- */
 async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum = 1) {
     console.log(`[Vixsrc] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
-    console.log(`[Vixsrc] Running on ${IS_VERCEL ? 'Vercel (Proxy enabled)' : 'Localhost (Direct)'}`);
+    console.log(`[Vixsrc] Running on ${IS_VERCEL ? 'Vercel (with fallbacks)' : 'Localhost'}`);
 
     let apiUrl;
     if (mediaType === 'movie') {
@@ -513,29 +530,15 @@ async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum
 
     let playlistContent = '';
     try {
-        // For playlist, we also use proxy if on Vercel
-        const playlistProxyUrl = getProxiedUrl(masterUrl);
-        const playlistResponse = await axios.get(playlistProxyUrl, {
-            headers: { ...VIXSRC_HEADERS, Referer: apiUrl },
-            timeout: 15000,
-            responseType: 'text'
-        });
-        playlistContent = playlistResponse.data;
+        const playlistData = await fetchWithFallback(masterUrl, { isHtml: false, timeout: 15000 });
+        if (playlistData && typeof playlistData === 'string') {
+            playlistContent = playlistData;
+        } else if (playlistData && typeof playlistData === 'object') {
+            console.log('[Vixsrc] Playlist data is object, converting to string');
+            playlistContent = JSON.stringify(playlistData);
+        }
     } catch (e) {
         console.log(`[Vixsrc] Could not fetch playlist content: ${e.message}`);
-        // Fallback direct
-        if (IS_VERCEL) {
-            try {
-                const directPlaylist = await axios.get(masterUrl, {
-                    headers: { ...VIXSRC_HEADERS, Referer: apiUrl },
-                    timeout: 10000,
-                    responseType: 'text'
-                });
-                playlistContent = directPlaylist.data;
-            } catch (e2) {
-                console.log(`[Vixsrc] Direct playlist fallback failed: ${e2.message}`);
-            }
-        }
     }
 
     const { sources, subtitles, audioTracks } = parsePlaylist(playlistContent, masterUrl, apiUrl);
@@ -551,11 +554,9 @@ async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum
         subtitles: subtitles,
         hasAudioTracks: audioTracks.length > 0,
         hasSubtitles: subtitles.length > 0,
-        // Add English track indicator for easy access
         hasEnglishAudio: audioTracks.some(t =>
             t.language === 'en' || t.language === 'eng' || t.language === 'english'
         ),
-        // Add default track indicator
         hasDefaultAudio: audioTracks.some(t => t.isDefault === true)
     }));
 
