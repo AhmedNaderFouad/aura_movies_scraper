@@ -145,13 +145,13 @@ const PROVIDER_META = {
     'onetouchtv': { name: 'OneTouchTV', type: 'direct', priority: 2 },
     'netmirror': { name: 'netmirror', type: 'direct', priority: 2 },
     'vidlink': { name: 'VidLink', type: 'direct', priority: 2 },
+    'zxcstreams': { name: 'ZXCStreams', type: 'direct', priority: 2 },
     //'icefy': { name: 'Icefy', type: 'direct', priority: 1 },
     //'dahmermovies': { name: 'DahmerMovies', type: 'direct', priority: 2 },
     //'fourkHDhub': { name: '4KHDHub', type: 'direct', priority: 2 },
     //'videasy': { name: 'Videasy', type: 'direct', priority: 1 },
     //'castletv': { name: 'CastleTV', type: 'direct', priority: 2 },
     //'hdghartv': { name: 'HDGharTV', type: 'direct', priority: 2 },
-    //'zxcstreams': { name: 'ZXCStreams', type: 'direct', priority: 2 },
 
 };
 
@@ -163,10 +163,10 @@ const PROVIDER_PRIORITY = [
     'netmirror',
     'showbox',
     'vidlink',
+    'zxcstreams',
     //'castletv',
     //'hdghartv',
     //'videasy',
-    //'zxcstreams',
     //'dahmermovies',
     //'icefy',
     //'fourkHDhub',
