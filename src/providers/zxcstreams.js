@@ -1,12 +1,39 @@
 const { createHash } = require('crypto');
 const { getDetails, resolveImdbId } = require('../utils/tmdb');
 
+// ============================================
+// التكوين الأساسي (بدون تغيير)
+// ============================================
+
 const PORTALS = ['https://zxcstream.xyz', 'https://zxcprime.xyz'];
 const INITIAL_BASE = 'https://r1.zxcstream.xyz';
 const SALT = '3435443433';
 const SERVERS = ['icarus', 'berkas', 'orion', 'athena'];
 const BASE_TTL = 10 * 60 * 1000;
 const PROBE_SUBDOMAINS = ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'v4', 'cdn', 'api', 'stream'];
+
+// ============================================
+// ✅ كشف بيئة Vercel وقائمة Bases احتياطية
+// ============================================
+
+const IS_VERCEL = process.env.VERCEL === '1' || process.env.NOW_REGION !== undefined;
+
+// قائمة Bases بديلة (يمكنك إضافة المزيد أو تعيينها عبر متغير البيئة ZXCSTREAMS_BASE)
+const FALLBACK_BASES = [
+    process.env.ZXCSTREAMS_BASE || 'https://r1.zxcstream.xyz',
+    'https://r2.zxcstream.xyz',
+    'https://r3.zxcstream.xyz',
+    'https://r4.zxcstream.xyz',
+    'https://v4.zxcstream.xyz',
+    'https://cdn.zxcstream.xyz',
+    'https://api.zxcstream.xyz',
+    'https://zxcstream.xyz',
+    'https://zxcprime.xyz'
+];
+
+// ============================================
+// الثوابت والدوال المساعدة (بدون تغيير)
+// ============================================
 
 const F = {
     id: 'rgrwsdsdfgwrwrwwr',
@@ -33,6 +60,10 @@ function sha512Hex(data) {
     return createHash('sha512').update(data).digest('hex');
 }
 
+// ============================================
+// ✅ دوال الاكتشاف الأصلية (مُعدلة لدعم Vercel)
+// ============================================
+
 async function verifyBase(base) {
     const rt = Date.now();
     const xt = sha512Hex(`${rt}:${SALT}:550`).slice(0, 64);
@@ -55,6 +86,10 @@ async function verifyBase(base) {
 }
 
 async function tryPortal(portal) {
+    if (IS_VERCEL) {
+        // على Vercel، نستخدم الـ fallback مباشرةً لأن الـ redirect لا يعمل مع الـ proxy
+        throw new Error('Portal method skipped on Vercel');
+    }
     const r = await fetch(portal, {
         headers: { 'User-Agent': COMMON_HEADERS['User-Agent'] },
         redirect: 'follow',
@@ -68,10 +103,30 @@ async function tryPortal(portal) {
 }
 
 async function probeSubdomain(sub) {
+    if (IS_VERCEL) {
+        throw new Error('Subdomain probe skipped on Vercel');
+    }
     return verifyBase(`https://${sub}.zxcstream.xyz`);
 }
 
 async function discoverBase() {
+    if (IS_VERCEL) {
+        // على Vercel، نبحث في قائمة الـ fallback bases عن واحدة تعمل
+        for (const base of FALLBACK_BASES) {
+            try {
+                await verifyBase(base);
+                console.log(`[ZXCStreams] Using fallback base: ${base}`);
+                return base;
+            } catch (e) {
+                console.log(`[ZXCStreams] Fallback ${base} failed: ${e.message}`);
+            }
+        }
+        // إذا لم تنجح أي قاعدة، نستخدم آخر قاعدة معروفة
+        console.warn('[ZXCStreams] All fallback bases failed, using last known:', _base);
+        return _base;
+    }
+
+    // منطق الاكتشاف الأصلي (لـ localhost)
     const portalResults = await Promise.allSettled(PORTALS.map((portal) => tryPortal(portal)));
     for (const r of portalResults) {
         if (r.status === 'fulfilled') {
@@ -121,6 +176,10 @@ function generateFrontendToken(tmdbId) {
     return { xt, rt };
 }
 
+// ============================================
+// ✅ طلب التوكين (مع إعادة محاولة وتأخير)
+// ============================================
+
 async function requestServerToken(base, tmdbId, referer) {
     const { xt, rt } = generateFrontendToken(tmdbId);
     const body = JSON.stringify({
@@ -128,20 +187,48 @@ async function requestServerToken(base, tmdbId, referer) {
         [F.fToken]: xt,
         [F.ts]: rt
     });
-    const res = await fetch(`${base}/backend/token`, {
-        method: 'POST',
-        headers: {
-            ...COMMON_HEADERS,
-            Origin: base,
-            'Content-Type': 'application/json',
-            Referer: referer
-        },
-        body
-    });
-    if (!res.ok) throw new Error(`token failed ${res.status}`);
-    const data = await res.json();
-    return { serverToken: data[F.token], serverTs: data[F.ts], xt };
+
+    // محاولة الطلب مع إعادة المحاولة (3 مرات)
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            const res = await fetch(`${base}/backend/token`, {
+                method: 'POST',
+                headers: {
+                    ...COMMON_HEADERS,
+                    Origin: base,
+                    'Content-Type': 'application/json',
+                    Referer: referer,
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Cache-Control': 'no-cache'
+                },
+                body,
+                signal: AbortSignal.timeout(8000 + attempt * 2000)
+            });
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(`token failed ${res.status}: ${text}`);
+            }
+            const data = await res.json();
+            if (data[F.token]) {
+                return { serverToken: data[F.token], serverTs: data[F.ts], xt };
+            }
+            throw new Error('Invalid token response');
+        } catch (err) {
+            lastError = err;
+            console.warn(`[ZXCStreams] token attempt ${attempt + 1} on ${base} failed: ${err.message}`);
+            if (attempt < 2) {
+                await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+            }
+        }
+    }
+    throw lastError;
 }
+
+// ============================================
+// ✅ جلب السيرفر (مع إعادة اكتشاف القاعدة عند فشل التوكين)
+// ============================================
 
 async function fetchServer(server, meta, type, season, episode) {
     let base = await getBase();
@@ -155,11 +242,30 @@ async function fetchServer(server, meta, type, season, episode) {
     try {
         tokenData = await requestServerToken(base, meta.tmdbId, referer);
     } catch (err) {
-        console.warn(`[ZXCStreams] token request failed on ${base}, re-discovering...`, err.message);
+        console.warn(`[ZXCStreams] token request failed on ${base}, trying fallback bases...`, err.message);
         invalidateBase();
-        base = await getBase();
+        // جرب القواعد الاحتياطية
+        let found = false;
+        for (const fallback of FALLBACK_BASES) {
+            if (fallback === base) continue;
+            try {
+                const testBase = fallback;
+                const testReferer = buildReferer(testBase);
+                tokenData = await requestServerToken(testBase, meta.tmdbId, testReferer);
+                base = testBase;
+                _base = testBase;
+                _baseValidatedAt = Date.now();
+                found = true;
+                break;
+            } catch (e) {
+                console.log(`[ZXCStreams] Fallback ${fallback} token failed: ${e.message}`);
+            }
+        }
+        if (!found) {
+            console.error('[ZXCStreams] All fallback bases failed, giving up');
+            return [];
+        }
         referer = buildReferer(base);
-        tokenData = await requestServerToken(base, meta.tmdbId, referer);
     }
 
     const { serverToken, serverTs, xt } = tokenData;
@@ -205,6 +311,10 @@ async function fetchServer(server, meta, type, season, episode) {
             requestHeaders
         }));
 }
+
+// ============================================
+// باقي الدوال (بدون تغيير)
+// ============================================
 
 async function getAllStreams(type, meta, season, episode) {
     const results = await Promise.allSettled(
