@@ -20,6 +20,10 @@ const VIDLINK_HEADERS = {
     'Origin': 'https://vidlink.pro'
 };
 
+// Optional proxy base. If set in the environment, the provider will rewrite
+// final media URLs to route through the proxy. Example: 'https://my-proxy.example.com'
+const PROXY_BASE = process.env.PROXY_BASE || '';
+
 // Alternative VidLink domains
 const VIDLINK_DOMAINS = [
     'https://vidlink.pro',
@@ -257,6 +261,13 @@ async function tryScraperMethod(tmdbId, mediaType, seasonNum, episodeNum) {
     }
 }
 
+// Helper to optionally rewrite a URL to go via proxy
+function maybeProxyUrl(url) {
+        if (!PROXY_BASE) return url;
+        const base = PROXY_BASE.replace(/\/$/, '');
+        return `${base}/stream-proxy?url=${encodeURIComponent(url)}&referer=${encodeURIComponent('https://vidlink.pro')}`;
+}
+
 // -----------------------------------------------------------------
 // Main Export Function
 // -----------------------------------------------------------------
@@ -279,7 +290,7 @@ async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum
         return [{
             name: 'Vidlink (Direct)',
             title: `Vidlink Direct | ${tmdbId}`,
-            url: directResult.url,
+            url: maybeProxyUrl(directResult.url),
             quality: '1080p',
             provider: 'vidlink',
             headers: { 'Referer': 'https://vidlink.pro' },
@@ -295,7 +306,7 @@ async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum
         return [{
             name: `Vidlink (${encryptedResult.method})`,
             title: `Vidlink Encrypted | ${tmdbId}`,
-            url: encryptedResult.url,
+            url: maybeProxyUrl(encryptedResult.url),
             quality: '1080p',
             provider: 'vidlink',
             headers: { 'Referer': 'https://vidlink.pro' },
@@ -311,7 +322,7 @@ async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum
         return [{
             name: 'Vidlink (Scraper)',
             title: `Vidlink Scraper | ${tmdbId}`,
-            url: scraperResult.url,
+            url: maybeProxyUrl(scraperResult.url),
             quality: '1080p',
             provider: 'vidlink',
             headers: { 'Referer': 'https://vidlink.pro' },
