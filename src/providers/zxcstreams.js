@@ -1,8 +1,9 @@
 const { createHash } = require('crypto');
 const { getDetails, resolveImdbId } = require('../utils/tmdb');
+const cloudscraper = require('cloudscraper');
 
 // ============================================
-// التكوين الأساسي (بدون تغيير)
+// Core Configuration
 // ============================================
 
 const PORTALS = ['https://zxcstream.xyz', 'https://zxcprime.xyz'];
@@ -13,14 +14,17 @@ const BASE_TTL = 10 * 60 * 1000;
 const PROBE_SUBDOMAINS = ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'v4', 'cdn', 'api', 'stream'];
 
 // ============================================
-// ✅ كشف بيئة Vercel وقائمة Bases احتياطية
+// Environment Detection
 // ============================================
 
 const IS_VERCEL = process.env.VERCEL === '1' || process.env.NOW_REGION !== undefined;
 
-// قائمة Bases بديلة (يمكنك إضافة المزيد أو تعيينها عبر متغير البيئة ZXCSTREAMS_BASE)
-const FALLBACK_BASES = [
-    process.env.ZXCSTREAMS_BASE || 'https://r1.zxcstream.xyz',
+// ============================================
+// Direct Base URLs for Vercel
+// ============================================
+
+const DIRECT_BASES = [
+    'https://r1.zxcstream.xyz',
     'https://r2.zxcstream.xyz',
     'https://r3.zxcstream.xyz',
     'https://r4.zxcstream.xyz',
@@ -28,11 +32,15 @@ const FALLBACK_BASES = [
     'https://cdn.zxcstream.xyz',
     'https://api.zxcstream.xyz',
     'https://zxcstream.xyz',
-    'https://zxcprime.xyz'
+    'https://zxcprime.xyz',
 ];
 
+if (process.env.ZXCSTREAMS_BASE) {
+    DIRECT_BASES.unshift(process.env.ZXCSTREAMS_BASE);
+}
+
 // ============================================
-// الثوابت والدوال المساعدة (بدون تغيير)
+// Constants and Helper Functions
 // ============================================
 
 const F = {
@@ -61,72 +69,82 @@ function sha512Hex(data) {
 }
 
 // ============================================
-// ✅ دوال الاكتشاف الأصلية (مُعدلة لدعم Vercel)
+// Base Verification with Cloudscraper
 // ============================================
 
-async function verifyBase(base) {
+async function verifyBase(base, timeout = 8000) {
     const rt = Date.now();
     const xt = sha512Hex(`${rt}:${SALT}:550`).slice(0, 64);
-    const r = await fetch(`${base}/backend/token`, {
-        method: 'POST',
-        headers: {
-            ...COMMON_HEADERS,
-            Origin: base,
-            'Content-Type': 'application/json',
-            Referer: `${base}/player/movie/550`
-        },
-        body: JSON.stringify({ [F.id]: '550', [F.fToken]: xt, [F.ts]: rt }),
-        signal: AbortSignal.timeout(6000)
-    });
-    if (r.ok) {
-        const d = await r.json();
-        if (d[F.token]) return base;
+    
+    try {
+        const response = await cloudscraper({
+            method: 'POST',
+            url: `${base}/backend/token`,
+            headers: {
+                ...COMMON_HEADERS,
+                Origin: base,
+                'Content-Type': 'application/json',
+                Referer: `${base}/player/movie/550`
+            },
+            body: JSON.stringify({ [F.id]: '550', [F.fToken]: xt, [F.ts]: rt }),
+            timeout: timeout,
+            gzip: true,
+            followRedirect: true,
+            retries: 2,
+        });
+        
+        const data = JSON.parse(response);
+        if (data[F.token]) {
+            return base;
+        }
+        throw new Error('verify failed: no token in response');
+    } catch (err) {
+        throw new Error(`verify failed: ${err.message}`);
     }
-    throw new Error(`verify failed: ${r.status}`);
 }
 
+// ============================================
+// Base Discovery
+// ============================================
+
 async function tryPortal(portal) {
-    if (IS_VERCEL) {
-        // على Vercel، نستخدم الـ fallback مباشرةً لأن الـ redirect لا يعمل مع الـ proxy
-        throw new Error('Portal method skipped on Vercel');
+    try {
+        const response = await cloudscraper({
+            method: 'GET',
+            url: portal,
+            headers: { 'User-Agent': COMMON_HEADERS['User-Agent'] },
+            followRedirect: true,
+            timeout: 10000,
+            gzip: true,
+        });
+        const redirectedBase = response.request.uri.origin;
+        if (redirectedBase === portal) {
+            throw new Error(`portal ${portal} did not redirect`);
+        }
+        return await verifyBase(redirectedBase);
+    } catch (err) {
+        throw err;
     }
-    const r = await fetch(portal, {
-        headers: { 'User-Agent': COMMON_HEADERS['User-Agent'] },
-        redirect: 'follow',
-        signal: AbortSignal.timeout(10000)
-    });
-    const redirectedBase = new URL(r.url).origin;
-    if (redirectedBase === new URL(portal).origin) {
-        throw new Error(`portal ${portal} did not redirect`);
-    }
-    return await verifyBase(redirectedBase);
 }
 
 async function probeSubdomain(sub) {
-    if (IS_VERCEL) {
-        throw new Error('Subdomain probe skipped on Vercel');
-    }
     return verifyBase(`https://${sub}.zxcstream.xyz`);
 }
 
 async function discoverBase() {
     if (IS_VERCEL) {
-        // على Vercel، نبحث في قائمة الـ fallback bases عن واحدة تعمل
-        for (const base of FALLBACK_BASES) {
+        for (const base of DIRECT_BASES) {
             try {
                 await verifyBase(base);
-                console.log(`[ZXCStreams] Using fallback base: ${base}`);
+                console.log(`[ZXCStreams] Using direct base: ${base}`);
                 return base;
             } catch (e) {
-                console.log(`[ZXCStreams] Fallback ${base} failed: ${e.message}`);
+                console.log(`[ZXCStreams] Direct base ${base} failed: ${e.message}`);
             }
         }
-        // إذا لم تنجح أي قاعدة، نستخدم آخر قاعدة معروفة
-        console.warn('[ZXCStreams] All fallback bases failed, using last known:', _base);
-        return _base;
+        throw new Error('No working base found');
     }
 
-    // منطق الاكتشاف الأصلي (لـ localhost)
     const portalResults = await Promise.allSettled(PORTALS.map((portal) => tryPortal(portal)));
     for (const r of portalResults) {
         if (r.status === 'fulfilled') {
@@ -177,7 +195,7 @@ function generateFrontendToken(tmdbId) {
 }
 
 // ============================================
-// ✅ طلب التوكين (مع إعادة محاولة وتأخير)
+// Token Request using Cloudscraper
 // ============================================
 
 async function requestServerToken(base, tmdbId, referer) {
@@ -188,12 +206,12 @@ async function requestServerToken(base, tmdbId, referer) {
         [F.ts]: rt
     });
 
-    // محاولة الطلب مع إعادة المحاولة (3 مرات)
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
         try {
-            const res = await fetch(`${base}/backend/token`, {
+            const response = await cloudscraper({
                 method: 'POST',
+                url: `${base}/backend/token`,
                 headers: {
                     ...COMMON_HEADERS,
                     Origin: base,
@@ -203,14 +221,14 @@ async function requestServerToken(base, tmdbId, referer) {
                     'Accept-Language': 'en-US,en;q=0.9',
                     'Cache-Control': 'no-cache'
                 },
-                body,
-                signal: AbortSignal.timeout(8000 + attempt * 2000)
+                body: body,
+                timeout: 10000 + attempt * 3000,
+                gzip: true,
+                followRedirect: true,
+                retries: 2,
             });
-            if (!res.ok) {
-                const text = await res.text();
-                throw new Error(`token failed ${res.status}: ${text}`);
-            }
-            const data = await res.json();
+
+            const data = JSON.parse(response);
             if (data[F.token]) {
                 return { serverToken: data[F.token], serverTs: data[F.ts], xt };
             }
@@ -219,7 +237,7 @@ async function requestServerToken(base, tmdbId, referer) {
             lastError = err;
             console.warn(`[ZXCStreams] token attempt ${attempt + 1} on ${base} failed: ${err.message}`);
             if (attempt < 2) {
-                await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+                await new Promise(resolve => setTimeout(resolve, 1500 * (attempt + 1)));
             }
         }
     }
@@ -227,7 +245,7 @@ async function requestServerToken(base, tmdbId, referer) {
 }
 
 // ============================================
-// ✅ جلب السيرفر (مع إعادة اكتشاف القاعدة عند فشل التوكين)
+// Server Fetching with Base Fallback
 // ============================================
 
 async function fetchServer(server, meta, type, season, episode) {
@@ -244,9 +262,8 @@ async function fetchServer(server, meta, type, season, episode) {
     } catch (err) {
         console.warn(`[ZXCStreams] token request failed on ${base}, trying fallback bases...`, err.message);
         invalidateBase();
-        // جرب القواعد الاحتياطية
         let found = false;
-        for (const fallback of FALLBACK_BASES) {
+        for (const fallback of DIRECT_BASES) {
             if (fallback === base) continue;
             try {
                 const testBase = fallback;
@@ -287,33 +304,42 @@ async function fetchServer(server, meta, type, season, episode) {
     }
     const qs = new URLSearchParams(params).toString();
 
-    const res = await fetch(`${base}/backend_/servers/${server}?${qs}`, {
-        headers: { ...COMMON_HEADERS, Origin: base, Referer: referer }
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    if (!data.success || !Array.isArray(data.links)) return [];
+    try {
+        const response = await cloudscraper({
+            method: 'GET',
+            url: `${base}/backend_/servers/${server}?${qs}`,
+            headers: { ...COMMON_HEADERS, Origin: base, Referer: referer },
+            timeout: 10000,
+            gzip: true,
+            followRedirect: true,
+        });
+        const data = JSON.parse(response);
+        if (!data.success || !Array.isArray(data.links)) return [];
 
-    const requestHeaders = {
-        Referer: referer,
-        Origin: base,
-        'User-Agent': COMMON_HEADERS['User-Agent']
-    };
+        const requestHeaders = {
+            Referer: referer,
+            Origin: base,
+            'User-Agent': COMMON_HEADERS['User-Agent']
+        };
 
-    return data.links
-        .filter((l) => l.link)
-        .map((l) => ({
-            server,
-            type: l.type || (l.link.includes('.m3u8') ? 'hls' : 'mp4'),
-            resolution: l.resolution ?? (l.source && l.source !== 'default' ? l.source : undefined) ?? '?',
-            size: l.size,
-            url: l.link,
-            requestHeaders
-        }));
+        return data.links
+            .filter((l) => l.link)
+            .map((l) => ({
+                server,
+                type: l.type || (l.link.includes('.m3u8') ? 'hls' : 'mp4'),
+                resolution: l.resolution ?? (l.source && l.source !== 'default' ? l.source : undefined) ?? '?',
+                size: l.size,
+                url: l.link,
+                requestHeaders
+            }));
+    } catch (err) {
+        console.error(`[ZXCStreams] fetchServer error: ${err.message}`);
+        return [];
+    }
 }
 
 // ============================================
-// باقي الدوال (بدون تغيير)
+// Stream Aggregation
 // ============================================
 
 async function getAllStreams(type, meta, season, episode) {
@@ -342,6 +368,10 @@ function formatSize(bytes) {
     if (n > 1e6) return `${(n / 1e6).toFixed(0)} MB`;
     return `${(n / 1e3).toFixed(0)} KB`;
 }
+
+// ============================================
+// Main Export Function
+// ============================================
 
 async function getZxcstreamsStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
     console.log(`[ZXCStreams] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
