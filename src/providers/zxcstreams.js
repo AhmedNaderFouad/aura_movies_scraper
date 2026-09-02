@@ -75,7 +75,7 @@ function sha512Hex(data) {
 async function verifyBase(base, timeout = 8000) {
     const rt = Date.now();
     const xt = sha512Hex(`${rt}:${SALT}:550`).slice(0, 64);
-    
+
     try {
         const response = await cloudscraper({
             method: 'POST',
@@ -92,7 +92,7 @@ async function verifyBase(base, timeout = 8000) {
             followRedirect: true,
             retries: 2,
         });
-        
+
         const data = JSON.parse(response);
         if (data[F.token]) {
             return base;
@@ -148,21 +148,21 @@ async function discoverBase() {
     const portalResults = await Promise.allSettled(PORTALS.map((portal) => tryPortal(portal)));
     for (const r of portalResults) {
         if (r.status === 'fulfilled') {
-            console.log(`[ZXCStreams] discovered base via portal redirect: ${r.value}`);
+            console.log(`[ZXCStreams] Discovered base via portal redirect: ${r.value}`);
             return r.value;
         }
     }
 
-    console.warn('[ZXCStreams] both portals failed, falling back to subdomain probing');
+    console.warn('[ZXCStreams] Both portals failed, falling back to subdomain probing');
     const settled = await Promise.allSettled(PROBE_SUBDOMAINS.map((sub) => probeSubdomain(sub)));
     for (const r of settled) {
         if (r.status === 'fulfilled') {
-            console.log(`[ZXCStreams] discovered base via subdomain probe: ${r.value}`);
+            console.log(`[ZXCStreams] Discovered base via subdomain probe: ${r.value}`);
             return r.value;
         }
     }
 
-    console.warn('[ZXCStreams] all discovery methods failed, keeping last known base:', _base);
+    console.warn('[ZXCStreams] All discovery methods failed, keeping last known base:', _base);
     return _base;
 }
 
@@ -235,7 +235,7 @@ async function requestServerToken(base, tmdbId, referer) {
             throw new Error('Invalid token response');
         } catch (err) {
             lastError = err;
-            console.warn(`[ZXCStreams] token attempt ${attempt + 1} on ${base} failed: ${err.message}`);
+            console.warn(`[ZXCStreams] Token attempt ${attempt + 1} on ${base} failed: ${err.message}`);
             if (attempt < 2) {
                 await new Promise(resolve => setTimeout(resolve, 1500 * (attempt + 1)));
             }
@@ -260,7 +260,7 @@ async function fetchServer(server, meta, type, season, episode) {
     try {
         tokenData = await requestServerToken(base, meta.tmdbId, referer);
     } catch (err) {
-        console.warn(`[ZXCStreams] token request failed on ${base}, trying fallback bases...`, err.message);
+        console.warn(`[ZXCStreams] Token request failed on ${base}, trying fallback bases...`, err.message);
         invalidateBase();
         let found = false;
         for (const fallback of DIRECT_BASES) {
@@ -353,6 +353,10 @@ async function getAllStreams(type, meta, season, episode) {
     return streams;
 }
 
+// ============================================
+// Quality Label Functions
+// ============================================
+
 function resolutionLabel(server, res) {
     if (typeof res === 'number' && res <= 4) {
         return ['360p', '480p', '720p', '1080p', '4K'][res] ?? `q${res}`;
@@ -367,6 +371,19 @@ function formatSize(bytes) {
     if (n > 1e9) return `${(n / 1e9).toFixed(2)} GB`;
     if (n > 1e6) return `${(n / 1e6).toFixed(0)} MB`;
     return `${(n / 1e3).toFixed(0)} KB`;
+}
+
+function isValidQuality(quality) {
+    if (!quality) return false;
+    const q = String(quality);
+    return /^(1080|720|480|360|4K|2160)p?$/i.test(q);
+}
+
+function isValidStream(stream) {
+    if (!stream || !stream.url) return false;
+    if (stream.url === 'null' || stream.url === 'undefined' || stream.url === '') return false;
+    if (!isValidQuality(stream.quality)) return false;
+    return true;
 }
 
 // ============================================
@@ -423,10 +440,10 @@ async function getZxcstreamsStreams(tmdbId, mediaType = 'movie', seasonNum = nul
                 l.server === 'icarus' ? 'Icarus' :
                 l.server === 'orion' ? 'Orion' :
                 l.server === 'athena' ? 'Athena' : 'Berkas';
-            const titleLine = [`${serverName} • ${label} • ${kind}`, size].filter(Boolean).join('\n');
-            streams.push({
+
+            const streamObj = {
                 name: `ZXCStreams ${serverName} ${label}`,
-                title: titleLine,
+                title: `${serverName} • ${label} • ${kind}`,
                 url: l.url,
                 quality: label,
                 provider: 'ZXCStreams',
@@ -435,10 +452,16 @@ async function getZxcstreamsStreams(tmdbId, mediaType = 'movie', seasonNum = nul
                     'Origin': l.requestHeaders.Origin,
                     'User-Agent': l.requestHeaders['User-Agent']
                 }
-            });
+            };
+
+            if (isValidStream(streamObj)) {
+                streams.push(streamObj);
+            } else {
+                console.log(`[ZXCStreams] Filtered out invalid stream: ${label} - ${l.url ? l.url.substring(0, 50) : 'no url'}`);
+            }
         }
 
-        console.log(`[ZXCStreams] Got ${streams.length} stream(s) for "${title}"`);
+        console.log(`[ZXCStreams] Got ${streams.length} valid stream(s) for "${title}"`);
         return streams;
     } catch (err) {
         console.error(`[ZXCStreams] Error: ${err.message}`);
