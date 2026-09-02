@@ -79,7 +79,7 @@ function sha512Hex(data) {
 // Base Verification
 // ============================================
 
-async function verifyBase(base, timeout = 4000) {
+async function verifyBase(base, timeout = 8000) {
     const rt = Date.now();
     const xt = sha512Hex(`${rt}:${SALT}:550`).slice(0, 64);
 
@@ -128,14 +128,14 @@ async function tryPortal(portal) {
         if (redirectedBase === portal) {
             throw new Error(`portal ${portal} did not redirect`);
         }
-        return await verifyBase(redirectedBase, 4000);
+        return await verifyBase(redirectedBase, 8000);
     } catch (err) {
         throw err;
     }
 }
 
 async function probeSubdomain(sub) {
-    return verifyBase(`https://${sub}.zxcstream.xyz`, 4000);
+    return verifyBase(`https://${sub}.zxcstream.xyz`, 8000);
 }
 
 async function discoverBase() {
@@ -146,7 +146,7 @@ async function discoverBase() {
     if (IS_VERCEL) {
         for (const base of DIRECT_BASES) {
             try {
-                await verifyBase(base, 4000);
+                await verifyBase(base, 8000);
                 console.log(`[ZXCStreams] Using direct base: ${base}`);
                 _cachedBase = base;
                 _cachedBaseAt = Date.now();
