@@ -79,7 +79,7 @@ function sha512Hex(data) {
 // Base Verification
 // ============================================
 
-async function verifyBase(base, timeout = 8000) {
+async function verifyBase(base, timeout = 12000) {
     const rt = Date.now();
     const xt = sha512Hex(`${rt}:${SALT}:550`).slice(0, 64);
 
@@ -121,21 +121,21 @@ async function tryPortal(portal) {
             url: portal,
             headers: { 'User-Agent': COMMON_HEADERS['User-Agent'] },
             followRedirect: true,
-            timeout: 6000,
+            timeout: 12000,
             gzip: true,
         });
         const redirectedBase = response.request.uri.origin;
         if (redirectedBase === portal) {
             throw new Error(`portal ${portal} did not redirect`);
         }
-        return await verifyBase(redirectedBase, 8000);
+        return await verifyBase(redirectedBase, 12000);
     } catch (err) {
         throw err;
     }
 }
 
 async function probeSubdomain(sub) {
-    return verifyBase(`https://${sub}.zxcstream.xyz`, 8000);
+    return verifyBase(`https://${sub}.zxcstream.xyz`, 12000);
 }
 
 async function discoverBase() {
@@ -146,7 +146,7 @@ async function discoverBase() {
     if (IS_VERCEL) {
         for (const base of DIRECT_BASES) {
             try {
-                await verifyBase(base, 8000);
+                await verifyBase(base, 12000);
                 console.log(`[ZXCStreams] Using direct base: ${base}`);
                 _cachedBase = base;
                 _cachedBaseAt = Date.now();
@@ -248,7 +248,7 @@ async function requestServerToken(base, tmdbId, referer) {
                     'Cache-Control': 'no-cache'
                 },
                 body: body,
-                timeout: 5000,
+                timeout: 12000,
                 gzip: true,
                 followRedirect: true,
                 retries: 1,
@@ -334,7 +334,7 @@ async function fetchServer(server, meta, type, season, episode) {
             method: 'GET',
             url: `${base}/backend_/servers/${server}?${qs}`,
             headers: { ...COMMON_HEADERS, Origin: base, Referer: referer },
-            timeout: 5000,
+            timeout: 12000,
             gzip: true,
             followRedirect: true,
         });
@@ -375,7 +375,7 @@ async function getAllStreams(type, meta, season, episode) {
     );
 
     const timeoutPromise = new Promise((resolve) => {
-        setTimeout(() => resolve([]), 8000);
+        setTimeout(() => resolve([]), 12000);
     });
 
     const results = await Promise.race([
@@ -384,7 +384,7 @@ async function getAllStreams(type, meta, season, episode) {
     ]);
 
     if (Array.isArray(results) && results.length === 0) {
-        console.warn('[ZXCStreams] Server aggregation timed out after 8 seconds');
+        console.warn('[ZXCStreams] Server aggregation timed out after 12 seconds');
         return [];
     }
 
@@ -483,7 +483,6 @@ async function getZxcstreamsStreams(tmdbId, mediaType = 'movie', seasonNum = nul
             const size = formatSize(l.size);
             const kind = l.type === 'hls' ? 'HLS' : 'MP4';
             const serverName =
-                l.server === 'icarus' ? 'Icarus' :
                 l.server === 'orion' ? 'Orion' :
                 l.server === 'athena' ? 'Athena' : 'Berkas';
 
