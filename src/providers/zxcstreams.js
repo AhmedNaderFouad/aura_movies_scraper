@@ -9,9 +9,11 @@ const cloudscraper = require('cloudscraper');
 const PORTALS = ['https://zxcstream.xyz', 'https://zxcprime.xyz'];
 const INITIAL_BASE = 'https://r1.zxcstream.xyz';
 const SALT = '3435443433';
-const SERVERS = ['icarus', 'berkas', 'orion', 'athena'];
-const BASE_TTL = 10 * 60 * 1000;
-const PROBE_SUBDOMAINS = ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'v4', 'cdn', 'api', 'stream'];
+
+const SERVERS = ['berkas', 'orion'];
+
+const BASE_TTL = 30 * 60 * 1000;
+const PROBE_SUBDOMAINS = ['r1', 'r2', 'r3', 'r4', 'v4', 'cdn', 'api', 'stream'];
 
 // ============================================
 // Environment Detection
@@ -63,16 +65,21 @@ const COMMON_HEADERS = {
 let _base = INITIAL_BASE;
 let _baseValidatedAt = 0;
 let discoveryPromise = null;
+let _cachedBase = null;
+let _cachedBaseAt = 0;
+
+// Token cache to avoid repeated requests
+const tokenCache = new Map();
 
 function sha512Hex(data) {
     return createHash('sha512').update(data).digest('hex');
 }
 
 // ============================================
-// Base Verification with Cloudscraper
+// Base Verification
 // ============================================
 
-async function verifyBase(base, timeout = 8000) {
+async function verifyBase(base, timeout = 4000) {
     const rt = Date.now();
     const xt = sha512Hex(`${rt}:${SALT}:550`).slice(0, 64);
 
@@ -90,7 +97,7 @@ async function verifyBase(base, timeout = 8000) {
             timeout: timeout,
             gzip: true,
             followRedirect: true,
-            retries: 2,
+            retries: 1,
         });
 
         const data = JSON.parse(response);
@@ -114,32 +121,38 @@ async function tryPortal(portal) {
             url: portal,
             headers: { 'User-Agent': COMMON_HEADERS['User-Agent'] },
             followRedirect: true,
-            timeout: 10000,
+            timeout: 6000,
             gzip: true,
         });
         const redirectedBase = response.request.uri.origin;
         if (redirectedBase === portal) {
             throw new Error(`portal ${portal} did not redirect`);
         }
-        return await verifyBase(redirectedBase);
+        return await verifyBase(redirectedBase, 4000);
     } catch (err) {
         throw err;
     }
 }
 
 async function probeSubdomain(sub) {
-    return verifyBase(`https://${sub}.zxcstream.xyz`);
+    return verifyBase(`https://${sub}.zxcstream.xyz`, 4000);
 }
 
 async function discoverBase() {
+    if (_cachedBase && Date.now() - _cachedBaseAt < BASE_TTL) {
+        return _cachedBase;
+    }
+
     if (IS_VERCEL) {
         for (const base of DIRECT_BASES) {
             try {
-                await verifyBase(base);
+                await verifyBase(base, 4000);
                 console.log(`[ZXCStreams] Using direct base: ${base}`);
+                _cachedBase = base;
+                _cachedBaseAt = Date.now();
                 return base;
             } catch (e) {
-                console.log(`[ZXCStreams] Direct base ${base} failed: ${e.message}`);
+                // ignore
             }
         }
         throw new Error('No working base found');
@@ -149,6 +162,8 @@ async function discoverBase() {
     for (const r of portalResults) {
         if (r.status === 'fulfilled') {
             console.log(`[ZXCStreams] Discovered base via portal redirect: ${r.value}`);
+            _cachedBase = r.value;
+            _cachedBaseAt = Date.now();
             return r.value;
         }
     }
@@ -158,6 +173,8 @@ async function discoverBase() {
     for (const r of settled) {
         if (r.status === 'fulfilled') {
             console.log(`[ZXCStreams] Discovered base via subdomain probe: ${r.value}`);
+            _cachedBase = r.value;
+            _cachedBaseAt = Date.now();
             return r.value;
         }
     }
@@ -186,6 +203,8 @@ async function getBase() {
 
 function invalidateBase() {
     _baseValidatedAt = 0;
+    _cachedBase = null;
+    _cachedBaseAt = 0;
 }
 
 function generateFrontendToken(tmdbId) {
@@ -195,10 +214,17 @@ function generateFrontendToken(tmdbId) {
 }
 
 // ============================================
-// Token Request using Cloudscraper
+// Token Request with Cache
 // ============================================
 
 async function requestServerToken(base, tmdbId, referer) {
+    const cacheKey = `${base}:${tmdbId}`;
+    const cached = tokenCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < 300000) {
+        console.log(`[ZXCStreams] Using cached token for ${base}`);
+        return cached.data;
+    }
+
     const { xt, rt } = generateFrontendToken(tmdbId);
     const body = JSON.stringify({
         [F.id]: tmdbId,
@@ -207,7 +233,7 @@ async function requestServerToken(base, tmdbId, referer) {
     });
 
     let lastError;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 1; attempt++) {
         try {
             const response = await cloudscraper({
                 method: 'POST',
@@ -222,30 +248,29 @@ async function requestServerToken(base, tmdbId, referer) {
                     'Cache-Control': 'no-cache'
                 },
                 body: body,
-                timeout: 10000 + attempt * 3000,
+                timeout: 5000,
                 gzip: true,
                 followRedirect: true,
-                retries: 2,
+                retries: 1,
             });
 
             const data = JSON.parse(response);
             if (data[F.token]) {
-                return { serverToken: data[F.token], serverTs: data[F.ts], xt };
+                const result = { serverToken: data[F.token], serverTs: data[F.ts], xt };
+                tokenCache.set(cacheKey, { data: result, timestamp: Date.now() });
+                return result;
             }
             throw new Error('Invalid token response');
         } catch (err) {
             lastError = err;
             console.warn(`[ZXCStreams] Token attempt ${attempt + 1} on ${base} failed: ${err.message}`);
-            if (attempt < 2) {
-                await new Promise(resolve => setTimeout(resolve, 1500 * (attempt + 1)));
-            }
         }
     }
     throw lastError;
 }
 
 // ============================================
-// Server Fetching with Base Fallback
+// Server Fetching
 // ============================================
 
 async function fetchServer(server, meta, type, season, episode) {
@@ -275,7 +300,7 @@ async function fetchServer(server, meta, type, season, episode) {
                 found = true;
                 break;
             } catch (e) {
-                console.log(`[ZXCStreams] Fallback ${fallback} token failed: ${e.message}`);
+                // ignore
             }
         }
         if (!found) {
@@ -309,7 +334,7 @@ async function fetchServer(server, meta, type, season, episode) {
             method: 'GET',
             url: `${base}/backend_/servers/${server}?${qs}`,
             headers: { ...COMMON_HEADERS, Origin: base, Referer: referer },
-            timeout: 10000,
+            timeout: 5000,
             gzip: true,
             followRedirect: true,
         });
@@ -343,12 +368,31 @@ async function fetchServer(server, meta, type, season, episode) {
 // ============================================
 
 async function getAllStreams(type, meta, season, episode) {
-    const results = await Promise.allSettled(
-        SERVERS.map((s) => fetchServer(s, meta, type, season, episode))
+    const serverPromises = SERVERS.map((s) =>
+        fetchServer(s, meta, type, season, episode)
+            .then(result => ({ server: s, result }))
+            .catch(() => ({ server: s, result: [] }))
     );
+
+    const timeoutPromise = new Promise((resolve) => {
+        setTimeout(() => resolve([]), 8000);
+    });
+
+    const results = await Promise.race([
+        Promise.allSettled(serverPromises),
+        timeoutPromise.then(() => [])
+    ]);
+
+    if (Array.isArray(results) && results.length === 0) {
+        console.warn('[ZXCStreams] Server aggregation timed out after 8 seconds');
+        return [];
+    }
+
     const streams = [];
     for (const r of results) {
-        if (r.status === 'fulfilled') streams.push(...r.value);
+        if (r.status === 'fulfilled' && r.value && r.value.result && Array.isArray(r.value.result)) {
+            streams.push(...r.value.result);
+        }
     }
     return streams;
 }
@@ -356,6 +400,19 @@ async function getAllStreams(type, meta, season, episode) {
 // ============================================
 // Quality Label Functions
 // ============================================
+
+function isValidQuality(quality) {
+    if (!quality) return false;
+    const q = String(quality);
+    return /^(1080|720|480|360|4K|2160)p?$/i.test(q);
+}
+
+function isValidStream(stream) {
+    if (!stream || !stream.url) return false;
+    if (stream.url === 'null' || stream.url === 'undefined' || stream.url === '') return false;
+    if (!isValidQuality(stream.quality)) return false;
+    return true;
+}
 
 function resolutionLabel(server, res) {
     if (typeof res === 'number' && res <= 4) {
@@ -373,25 +430,14 @@ function formatSize(bytes) {
     return `${(n / 1e3).toFixed(0)} KB`;
 }
 
-function isValidQuality(quality) {
-    if (!quality) return false;
-    const q = String(quality);
-    return /^(1080|720|480|360|4K|2160)p?$/i.test(q);
-}
-
-function isValidStream(stream) {
-    if (!stream || !stream.url) return false;
-    if (stream.url === 'null' || stream.url === 'undefined' || stream.url === '') return false;
-    if (!isValidQuality(stream.quality)) return false;
-    return true;
-}
-
 // ============================================
 // Main Export Function
 // ============================================
 
 async function getZxcstreamsStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
     console.log(`[ZXCStreams] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
+
+    const startTime = Date.now();
 
     try {
         const type = mediaType === 'tv' ? 'tv' : 'movie';
@@ -456,12 +502,11 @@ async function getZxcstreamsStreams(tmdbId, mediaType = 'movie', seasonNum = nul
 
             if (isValidStream(streamObj)) {
                 streams.push(streamObj);
-            } else {
-                console.log(`[ZXCStreams] Filtered out invalid stream: ${label} - ${l.url ? l.url.substring(0, 50) : 'no url'}`);
             }
         }
 
-        console.log(`[ZXCStreams] Got ${streams.length} valid stream(s) for "${title}"`);
+        const elapsed = Date.now() - startTime;
+        console.log(`[ZXCStreams] Got ${streams.length} valid stream(s) for "${title}" in ${elapsed}ms`);
         return streams;
     } catch (err) {
         console.error(`[ZXCStreams] Error: ${err.message}`);
