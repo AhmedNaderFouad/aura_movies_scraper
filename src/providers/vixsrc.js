@@ -1,17 +1,18 @@
 // src/providers/vixsrc.js
-// ✅ Ultimate fix for Vercel/Codespaces (403 Forbidden)
-// Uses Puppeteer + Multiple Proxies + High Timeout
+// ✅ Cloudscraper-based version — works on Vercel/Codespaces without IP blocks
 
-const axios = require('axios');
+const cloudscraper = require('cloudscraper');
 
 // ============================================
 // Configuration
 // ============================================
 
 const BASE_URL = 'https://vixsrc.to';
-const IS_VERCEL = process.env.VERCEL === '1' || process.env.NOW_REGION !== undefined || process.env.CODESPACES === 'true';
+const IS_VERCEL =
+    process.env.VERCEL === '1' ||
+    process.env.NOW_REGION !== undefined ||
+    process.env.CODESPACES === 'true';
 
-// قائمة بـ User-Agents للتناوب
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -20,16 +21,14 @@ const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0',
 ];
 let uaIndex = 0;
-
 function getNextUserAgent() {
     return USER_AGENTS[uaIndex++ % USER_AGENTS.length];
 }
 
-// Proxies سريعة (للحالات التي لا تعمل فيها Puppeteer)
+// Proxies كاحتياطي لو cloudscraper فشل (نادراً)
 const PROXY_SERVICES = [
     (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
     (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    (url) => `https://proxy.cors.sh/${encodeURIComponent(url)}`,
 ];
 
 const VIXSRC_HEADERS = {
@@ -50,7 +49,7 @@ const VIXSRC_HEADERS = {
 };
 
 // ============================================
-// Language Mapping (Full Support)
+// Language Mapping (كما هو)
 // ============================================
 
 const LANGUAGE_MAP = {
@@ -101,7 +100,7 @@ function getLanguageName(langCode) {
 }
 
 // ============================================
-// Utility Functions
+// Utility Functions (كما هو)
 // ============================================
 
 function detectAllLanguages(playlistContent) {
@@ -121,9 +120,9 @@ function detectAllLanguages(playlistContent) {
                 code: langCode,
                 label: label || getLanguageName(langCode),
                 name: getLanguageName(langCode),
-                uri: uri,
-                isDefault: isDefault,
-                isForced: isForced,
+                uri,
+                isDefault,
+                isForced,
                 type: 'audio'
             });
         }
@@ -140,179 +139,145 @@ function detectLanguageFromPlaylist(playlistContent) {
     return languages[0].code;
 }
 
-function extractAudioTracks(playlistContent) {
-    if (!playlistContent) return [];
-    const audioTracks = [];
-    const audioTrackRegex = /#EXT-X-MEDIA:TYPE=AUDIO[^\n]*/gi;
-    let match;
-    while ((match = audioTrackRegex.exec(playlistContent)) !== null) {
-        const block = match[0];
-        const language = block.match(/LANGUAGE="([^"]+)"/)?.[1] || 'unknown';
-        const label = block.match(/NAME="([^"]+)"/)?.[1] || 'Audio';
-        const uri = block.match(/URI="([^"]+)"/)?.[1] || null;
-        const isDefault = block.includes('DEFAULT=YES') || block.includes('DEFAULT=1');
-        const isForced = block.includes('FORCED=YES') || block.includes('FORCED=1');
-        const channels = block.match(/CHANNELS="([^"]+)"/)?.[1] || null;
-        audioTracks.push({
-            language: language,
-            label: label,
-            name: getLanguageName(language),
-            uri: uri,
-            isDefault: isDefault,
-            isForced: isForced,
-            channels: channels,
-            type: 'audio'
-        });
-    }
-    return audioTracks;
-}
-
 // ============================================
-// Puppeteer Engine (محاكاة متصفح حقيقي)
+// 🔥 Core Fetcher — cloudscraper (البديل الجديد لـ axios)
 // ============================================
 
-let puppeteer, chromium;
+/**
+ * طلب HTTP باستخدام cloudscraper (يتخطى Cloudflare وحمايات البوت).
+ * @param {string} url
+ * @param {object} options { method, headers, body, timeout, isJson, retries }
+ * @returns {Promise<string|object|null>}
+ */
+async function cloudscraperRequest(url, options = {}) {
+    const {
+        method = 'GET',
+        headers = {},
+        body = null,
+        timeout = 20000,
+        isJson = false,
+        retries = 2,
+    } = options;
 
-async function fetchWithPuppeteer(url, isJson = false) {
-    try {
-        if (!puppeteer) {
-            puppeteer = require('puppeteer-core');
-            chromium = require('chrome-aws-lambda');
-        }
-    } catch (e) {
-        console.log('[Vixsrc] Puppeteer not installed, skipping...');
-        return null;
-    }
+    const finalHeaders = {
+        ...VIXSRC_HEADERS,
+        ...headers,
+        'User-Agent': headers['User-Agent'] || getNextUserAgent(),
+    };
 
-    console.log('[Vixsrc] Launching Puppeteer browser...');
-    let browser = null;
-    try {
-        browser = await puppeteer.launch({
-            args: chromium.args,
-            executablePath: await chromium.executablePath,
-            headless: true,
-            ignoreHTTPSErrors: true,
-        });
-        const page = await browser.newPage();
-        await page.setUserAgent(getNextUserAgent());
-        await page.setExtraHTTPHeaders({
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        });
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-        const content = await page.content();
-        await browser.close();
-        console.log('[Vixsrc] Puppeteer succeeded.');
-        
-        if (isJson) {
-            const jsonMatch = content.match(/{.*}/s);
-            if (jsonMatch) {
-                try { return JSON.parse(jsonMatch[0]); } catch {}
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            console.log(`[Vixsrc] ${method} attempt ${attempt + 1}: ${url.substring(0, 80)}...`);
+
+            const response = await cloudscraper({
+                method,
+                url,
+                headers: finalHeaders,
+                body: body || undefined,
+                timeout,
+                gzip: true,
+                followRedirect: true,
+                retries: 0, // إحنا اللي بندير الـ retries
+            });
+
+            if (!response) {
+                console.log(`[Vixsrc] Empty response on attempt ${attempt + 1}`);
+                continue;
             }
-            return null;
+
+            // cloudscraper بيرجع string
+            if (isJson) {
+                try {
+                    return JSON.parse(response);
+                } catch {
+                    // أحياناً الـ JSON بيكون مغلف في HTML
+                    const jsonMatch = response.match(/\{[\s\S]*\}/);
+                    if (jsonMatch) {
+                        try { return JSON.parse(jsonMatch[0]); } catch { /* ignore */ }
+                    }
+                    console.log('[Vixsrc] Failed to parse JSON response');
+                    return null;
+                }
+            }
+
+            console.log(`[Vixsrc] ✅ Success (${response.length} bytes)`);
+            return response;
+        } catch (err) {
+            console.log(`[Vixsrc] Attempt ${attempt + 1} failed: ${err.message}`);
+            if (attempt < retries) {
+                await new Promise(r => setTimeout(r, 1200 * (attempt + 1)));
+            }
         }
-        return content;
-    } catch (error) {
-        if (browser) await browser.close();
-        console.log(`[Vixsrc] Puppeteer failed: ${error.message}`);
-        return null;
-    }
-}
-
-// ============================================
-// Core Fetch Functions (Puppeteer أولاً)
-// ============================================
-
-async function fetchWithProxy(url, proxyFn, headers, responseType = 'text', timeout = 20000) {
-    const proxyUrl = proxyFn(url);
-    console.log(`[Vixsrc] Trying proxy: ${proxyUrl.substring(0, 60)}...`);
-    try {
-        const response = await axios.get(proxyUrl, {
-            headers: { ...headers, 'User-Agent': getNextUserAgent() },
-            timeout: timeout,
-            responseType: responseType,
-            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
-        });
-        if (response.status === 200 && response.data) {
-            console.log(`[Vixsrc] Proxy succeeded.`);
-            return response.data;
-        }
-    } catch (error) {
-        console.log(`[Vixsrc] Proxy failed: ${error.message}`);
-    }
-    return null;
-}
-
-async function fetchDirect(url, headers, responseType = 'text', timeout = 10000) {
-    console.log(`[Vixsrc] Trying direct: ${url}`);
-    try {
-        const response = await axios.get(url, {
-            headers: { ...headers, 'User-Agent': getNextUserAgent() },
-            timeout: timeout,
-            responseType: responseType,
-            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
-        });
-        if (response.status === 200 && response.data) {
-            console.log(`[Vixsrc] Direct succeeded.`);
-            return response.data;
-        }
-    } catch (error) {
-        console.log(`[Vixsrc] Direct failed: ${error.message}`);
-    }
-    return null;
-}
-
-async function fetchWithFallback(url, options = {}) {
-    const { isJson = false, isHtml = false, timeout = 20000 } = options;
-    const headers = { ...VIXSRC_HEADERS };
-    let responseType = 'text';
-    if (isJson) responseType = 'json';
-    else if (isHtml) responseType = 'text';
-
-    // 1. محاولة Puppeteer (الأكثر نجاحاً على Vercel)
-    if (IS_VERCEL) {
-        const result = await fetchWithPuppeteer(url, isJson);
-        if (result) return result;
     }
 
-    // 2. محاولة مباشرة مع Retry يدوي
-    for (let i = 0; i < 3; i++) {
-        const result = await fetchDirect(url, headers, responseType, timeout);
-        if (result) return result;
-        await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-    }
-
-    // 3. محاولة جميع الـ Proxies
+    // احتياطي أخير: proxify
+    console.log('[Vixsrc] cloudscraper failed, trying proxies as last resort...');
     for (const proxyFn of PROXY_SERVICES) {
-        const result = await fetchWithProxy(url, proxyFn, headers, responseType, timeout);
-        if (result) return result;
+        try {
+            const proxyUrl = proxyFn(url);
+            const response = await cloudscraper({
+                method: 'GET',
+                url: proxyUrl,
+                headers: { 'User-Agent': getNextUserAgent() },
+                timeout,
+                gzip: true,
+                followRedirect: true,
+            });
+            if (response) {
+                if (isJson) {
+                    try { return JSON.parse(response); } catch { /* fallthrough */ }
+                } else {
+                    return response;
+                }
+            }
+        } catch (e) {
+            console.log(`[Vixsrc] Proxy fallback failed: ${e.message}`);
+        }
     }
 
-    console.log('[Vixsrc] All fetch methods failed.');
     return null;
 }
 
 // ============================================
-// API Request Functions
+// API Request Functions (نفس المنطق، بس بـ cloudscraper)
 // ============================================
 
 async function fetchApi(url) {
     console.log(`[Vixsrc] Fetching API: ${url}`);
-    const data = await fetchWithFallback(url, { isJson: true, timeout: 20000 });
+    const data = await cloudscraperRequest(url, {
+        isJson: true,
+        timeout: 20000,
+        retries: 2,
+        headers: {
+            'Accept': 'application/json, text/plain, */*',
+            'Referer': `${BASE_URL}/`,
+        },
+    });
     return data || null;
 }
 
 async function fetchEmbedPage(suburl) {
     const fullUrl = BASE_URL + suburl;
     console.log(`[Vixsrc] Fetching Embed: ${fullUrl}`);
-    const data = await fetchWithFallback(fullUrl, { isHtml: true, timeout: 20000 });
+    const data = await cloudscraperRequest(fullUrl, {
+        isJson: false,
+        timeout: 20000,
+        retries: 2,
+        headers: {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Referer': `${BASE_URL}/`,
+            'Sec-Fetch-Dest': 'iframe',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'same-origin',
+        },
+    });
     if (typeof data === 'string') return data;
     if (data && typeof data === 'object') return JSON.stringify(data);
     return null;
 }
 
 // ============================================
-// Token Extraction & Playlist Processing
+// Token Extraction & Playlist Processing (كما هو)
 // ============================================
 
 function extractTokenData(html) {
@@ -356,13 +321,9 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
         const isForced = line.includes('FORCED=YES') || line.includes('FORCED=1');
         const channels = line.match(/CHANNELS="([^"]+)"/)?.[1] || null;
         allAudioTracks.push({
-            language: language,
-            label: label,
+            language, label,
             name: getLanguageName(language),
-            uri: uri,
-            isDefault: isDefault,
-            isForced: isForced,
-            channels: channels,
+            uri, isDefault, isForced, channels,
             type: 'audio'
         });
     }
@@ -376,12 +337,9 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
         const isDefault = line.includes('DEFAULT=YES') || line.includes('DEFAULT=1');
         const isForced = line.includes('FORCED=YES') || line.includes('FORCED=1');
         subtitles.push({
-            url: url,
-            label: label,
-            language: language,
+            url, label, language,
             name: getLanguageName(language),
-            isDefault: isDefault,
-            isForced: isForced,
+            isDefault, isForced,
             format: 'vtt',
             type: 'subtitle'
         });
@@ -434,7 +392,7 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
         provider: 'vixsrc',
         language: detectedLang,
         audioTracks: sortedAudioTracks,
-        subtitles: subtitles,
+        subtitles,
         hasAudioTracks: sortedAudioTracks.length > 0,
         hasSubtitles: subtitles.length > 0,
         headers: {
@@ -447,12 +405,12 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
 }
 
 // ============================================
-// Main Stream Function
+// Main Stream Function (كما هو)
 // ============================================
 
 async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum = 1) {
     console.log(`[Vixsrc] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
-    console.log(`[Vixsrc] Running on ${IS_VERCEL ? 'Vercel/Codespaces (Puppeteer mode)' : 'Localhost'}`);
+    console.log(`[Vixsrc] Running on ${IS_VERCEL ? 'Vercel/Codespaces' : 'Localhost'} (cloudscraper mode)`);
 
     let apiUrl;
     if (mediaType === 'movie') {
@@ -467,8 +425,8 @@ async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum
         console.log('[Vixsrc] No src returned from API');
         return [];
     }
-    console.log(`[Vixsrc] Step 2 - Fetching embed page: ${BASE_URL}${apiData.src}`);
 
+    console.log(`[Vixsrc] Step 2 - Fetching embed page: ${BASE_URL}${apiData.src}`);
     const html = await fetchEmbedPage(apiData.src);
     if (!html) {
         console.log('[Vixsrc] Failed to fetch embed page');
@@ -482,11 +440,19 @@ async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum
     }
 
     const masterUrl = buildMasterUrl(tokenData);
-    console.log(`[Vixsrc] Step 3 - Master URL: ${masterUrl}`);
+    console.log(`[Vixsrc] Step 3 - Master URL: ${masterUrl.substring(0, 120)}...`);
 
     let playlistContent = '';
     try {
-        const playlistData = await fetchWithFallback(masterUrl, { isHtml: false, timeout: 20000 });
+        const playlistData = await cloudscraperRequest(masterUrl, {
+            isJson: false,
+            timeout: 20000,
+            retries: 2,
+            headers: {
+                'Accept': '*/*',
+                'Referer': `${BASE_URL}/`,
+            },
+        });
         if (playlistData && typeof playlistData === 'string') {
             playlistContent = playlistData;
         } else if (playlistData && typeof playlistData === 'object') {
@@ -505,8 +471,8 @@ async function getStreams(tmdbId, mediaType = 'movie', seasonNum = 1, episodeNum
 
     const finalSources = sources.map(source => ({
         ...source,
-        audioTracks: audioTracks,
-        subtitles: subtitles,
+        audioTracks,
+        subtitles,
         hasAudioTracks: audioTracks.length > 0,
         hasSubtitles: subtitles.length > 0,
         hasEnglishAudio: audioTracks.some(t =>
